@@ -161,6 +161,16 @@ ydl_opts = {
 }
 ```
 
+## mac无法打开问题
+
+在 macOS 上，可能会遇到“无法打开”的问题。这是因为 macOS 对下载的文件进行了安全检查，防止未知来源的应用程序运行。
+
+解决方法：
+
+```
+xattr -dr com.apple.quarantine video-downloader-macos-latest/video-downloader
+```
+
 ## License
 
 MIT License
