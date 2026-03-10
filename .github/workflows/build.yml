@@ -29,9 +29,12 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller fastapi uvicorn yt-dlp requests pydantic python-multipart pywebview
 
-    - name: Create directories
+    - name: Create static directory if it doesn't exist
+      shell: bash
       run: |
-        mkdir -p static
+        if [ ! -d "static" ]; then
+          mkdir -p static
+        fi
 
     - name: Build executable
       run: |
