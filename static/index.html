@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Downloader</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .input-group {
+            margin: 20px 0;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        .formats {
+            margin-top: 10px;
+        }
+        select {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            width: 100%;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Video Downloader</h1>
+        <div class="input-group">
+            <input type="text" id="url" placeholder="输入视频链接 (YouTube, TikTok, Bilibili)">
+            <button onclick="analyze()">分析视频</button>
+        </div>
+        <div id="result" class="result" style="display: none;">
+            <h3 id="title"></h3>
+            <div class="formats">
+                <label>选择格式:</label>
+                <select id="format"></select>
+                <button onclick="download()">开始下载</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        async function analyze() {
+            const url = document.getElementById('url').value;
+            if (!url) {
+                alert('请输入视频链接');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
+                if (!response.ok) {
+                    throw new Error('分析失败');
+                }
+                const data = await response.json();
+                
+                document.getElementById('title').textContent = data.title;
+                
+                const formatSelect = document.getElementById('format');
+                formatSelect.innerHTML = '';
+                data.formats.forEach(fmt => {
+                    const option = document.createElement('option');
+                    option.value = fmt.format_id;
+                    option.textContent = `${fmt.height}p - ${fmt.ext} ${fmt.has_audio ? '(含音频)' : '(仅视频)'}`;
+                    formatSelect.appendChild(option);
+                });
+                
+                document.getElementById('result').style.display = 'block';
+            } catch (error) {
+                alert('分析失败: ' + error.message);
+            }
+        }
+        
+        function download() {
+            const url = document.getElementById('url').value;
+            const formatId = document.getElementById('format').value;
+            
+            const downloadUrl = `/api/download?url=${encodeURIComponent(url)}&format_id=${formatId}`;
+            window.location.href = downloadUrl;
+        }
+    </script>
+</body>
+</html>
