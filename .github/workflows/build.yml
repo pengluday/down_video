@@ -37,6 +37,7 @@ jobs:
         fi
 
     - name: Build executable
+      shell: bash
       run: |
         pyinstaller --onefile --name "video-downloader" \
         --add-data "static:static" \
