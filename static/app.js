@@ -133,52 +133,16 @@ async function downloadVideo() {
         
         showToast('服务器正在下载视频，请稍候...', 'info');
         
-        const response = await fetch(downloadUrl);
-        
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(errorText || '下载失败');
-        }
-        
-        const contentLength = response.headers.get('content-length');
-        const total = contentLength ? parseInt(contentLength, 10) : 0;
-        
-        const reader = response.body.getReader();
-        const chunks = [];
-        let downloaded = 0;
-        
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            
-            chunks.push(value);
-            downloaded += value.length;
-            
-            if (total > 0) {
-                const progress = Math.round((downloaded / total) * 100);
-                updateProgress(progress, downloaded, total);
-            } else {
-                const mb = (downloaded / 1024 / 1024).toFixed(2);
-                updateProgress(50, downloaded, 0, mb);
-            }
-        }
-        
-        const blob = new Blob(chunks, { type: 'video/mp4' });
-        const blobUrl = URL.createObjectURL(blob);
-        
-        const filename = sanitizeFilename(currentVideoInfo.title) + '.mp4';
-        
+        // 直接创建下载链接，让浏览器处理下载
         const link = document.createElement('a');
-        link.href = blobUrl;
-        link.download = filename;
+        link.href = downloadUrl;
+        link.download = sanitizeFilename(currentVideoInfo.title) + '.mp4';
         link.style.display = 'none';
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
         
-        URL.revokeObjectURL(blobUrl);
-        
-        showToast('视频下载完成！', 'success');
+        showToast('视频下载已开始！', 'success');
         hideVideoPanel();
         
     } catch (error) {
@@ -191,27 +155,6 @@ async function downloadVideo() {
     }
 }
 
-function updateProgress(percent, downloaded, total, mb) {
-    const progressFill = downloadProgress.querySelector('.progress-fill');
-    const progressText = downloadProgress.querySelector('.progress-text');
-    
-    if (progressFill) {
-        progressFill.style.width = percent + '%';
-        progressFill.style.animation = 'none';
-    }
-    
-    if (progressText) {
-        if (total > 0) {
-            const downloadedMB = (downloaded / 1024 / 1024).toFixed(2);
-            const totalMB = (total / 1024 / 1024).toFixed(2);
-            progressText.textContent = `下载中: ${downloadedMB}MB / ${totalMB}MB (${percent}%)`;
-        } else {
-            progressText.textContent = `下载中: ${mb}MB`;
-        }
-    }
-}
-
-// Hide Video Panel
 function hideVideoPanel() {
     videoPanel.classList.add('hidden');
     currentVideoInfo = null;
