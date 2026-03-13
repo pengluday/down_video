@@ -275,5 +275,5 @@ def open_browser():
 
 if __name__ == "__main__":
     threading.Timer(1.5, open_browser).start()
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
     print("Server started: http://127.0.0.1:8000")

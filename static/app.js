@@ -131,7 +131,8 @@ async function downloadVideo() {
     try {
         const downloadUrl = `/api/download?url=${encodeURIComponent(currentVideoUrl)}&format_id=${formatId}`;
         
-        showToast('服务器正在下载视频，请稍候...', 'info');
+        // 显示等待提示，设置更长的显示时间
+        showToast('服务器正在下载视频，请稍候...', 'info', 8000);
         
         // 直接创建下载链接，让浏览器处理下载
         const link = document.createElement('a');
@@ -142,16 +143,25 @@ async function downloadVideo() {
         link.click();
         document.body.removeChild(link);
         
-        showToast('视频下载已开始！', 'success');
-        hideVideoPanel();
+        // 延迟显示成功消息，确保用户看到等待提示
+        setTimeout(() => {
+            showToast('视频下载已开始！', 'success', 5000);
+            // 成功提示显示后，再等待一段时间隐藏进度条
+            // 这样可以确保用户看到下载状态，直到浏览器开始下载
+            setTimeout(() => {
+                downloadProgress.classList.add('hidden');
+                hideVideoPanel();
+            }, 3000);
+        }, 2000);
         
     } catch (error) {
         showToast(error.message || '下载失败，请重试', 'error');
         console.error('Download error:', error);
+        downloadProgress.classList.add('hidden');
     } finally {
         downloadBtn.disabled = false;
         downloadBtn.querySelector('.btn-text').textContent = '开始下载';
-        downloadProgress.classList.add('hidden');
+        // 不要在这里立即隐藏进度条，让它在成功消息后再隐藏
     }
 }
 
@@ -168,7 +178,7 @@ function setLoading(loading) {
 }
 
 // Show Toast
-function showToast(message, type = 'info') {
+function showToast(message, type = 'info', duration = 4000) {
     toastMessage.textContent = message;
     toast.className = 'toast';
     toast.classList.add(type);
@@ -176,7 +186,7 @@ function showToast(message, type = 'info') {
     
     setTimeout(() => {
         toast.classList.add('hidden');
-    }, 4000);
+    }, duration);
 }
 
 // Validate URL
