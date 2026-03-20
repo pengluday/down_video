@@ -1,5 +1,6 @@
 // DOM Elements
 const videoUrlInput = document.getElementById('videoUrl');
+const cookieInput = document.getElementById('cookieInput');
 const analyzeBtn = document.getElementById('analyzeBtn');
 const videoPanel = document.getElementById('videoPanel');
 const videoThumbnail = document.getElementById('videoThumbnail');
@@ -16,6 +17,7 @@ const toastMessage = document.getElementById('toastMessage');
 // State
 let currentVideoInfo = null;
 let currentVideoUrl = null;
+let currentCookie = null;
 
 // Event Listeners
 analyzeBtn.addEventListener('click', analyzeVideo);
@@ -31,6 +33,7 @@ videoUrlInput.addEventListener('keypress', (e) => {
 // Analyze Video
 async function analyzeVideo() {
     const url = videoUrlInput.value.trim();
+    const cookie = cookieInput.value.trim();
     
     if (!url) {
         showToast('请输入视频链接', 'error');
@@ -43,10 +46,16 @@ async function analyzeVideo() {
     }
     
     currentVideoUrl = url;
+    currentCookie = cookie;
     setLoading(true);
     
     try {
-        const response = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
+        let apiUrl = `/api/info?url=${encodeURIComponent(url)}`;
+        if (cookie) {
+            apiUrl += `&cookie=${encodeURIComponent(cookie)}`;
+        }
+        
+        const response = await fetch(apiUrl);
         
         if (!response.ok) {
             const error = await response.json();
@@ -129,7 +138,10 @@ async function downloadVideo() {
     downloadProgress.classList.remove('hidden');
 
     try {
-        const downloadUrl = `/api/download?url=${encodeURIComponent(currentVideoUrl)}&format_id=${formatId}`;
+        let downloadUrl = `/api/download?url=${encodeURIComponent(currentVideoUrl)}&format_id=${formatId}`;
+        if (currentCookie) {
+            downloadUrl += `&cookie=${encodeURIComponent(currentCookie)}`;
+        }
         
         // 显示等待提示，设置更长的显示时间
         showToast('服务器正在下载视频，请稍候...', 'info', 8000);
@@ -168,6 +180,7 @@ async function downloadVideo() {
 function hideVideoPanel() {
     videoPanel.classList.add('hidden');
     currentVideoInfo = null;
+    currentCookie = null;
 }
 
 // Set Loading State

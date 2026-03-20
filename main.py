@@ -54,7 +54,7 @@ app.add_middleware(
 # ============= API 路由 =============
 
 @app.get("/api/info")
-async def get_video_info(url: str = Query(..., description="视频链接")):
+async def get_video_info(url: str = Query(..., description="视频链接"), cookie: str = Query(None, description="Cookie字符串，用于解决登录限制")):
     """
     解析视频信息
     
@@ -68,11 +68,22 @@ async def get_video_info(url: str = Query(..., description="视频链接")):
             "quiet": True,
             "skip_download": True,
             "noplaylist": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web", "ios", "tv"],
+                    "player_skip": ["configs"]
+                }
+            }
         }
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        if cookie:
+            ydl_opts["cookies"] = cookie
         
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print("="*50)
+            info = ydl.extract_info(url, download=False)
+            print(info)
+
         # 提取视频格式
         formats = []
         
@@ -112,6 +123,14 @@ async def get_video_info(url: str = Query(..., description="视频链接")):
         
         return response
     
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e)
+        if "Requested format is not available" in error_msg or "This video is not available" in error_msg:
+            logger.warning(f"[API] 视频无可用格式: {url}")
+            raise HTTPException(status_code=400, detail="该视频无可用的下载格式，可能是已删除或仅限特定地区观看的视频")
+        else:
+            logger.error(f"[API] 解析错误: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
     except Exception as e:
         logger.error(f"[API] 解析错误: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -121,7 +140,8 @@ async def get_video_info(url: str = Query(..., description="视频链接")):
 async def download_video(
     url: str = Query(..., description="视频链接"),
     format_id: str = Query(None, description="格式ID，如 136 (720p)"),
-    quality: int = Query(None, description="分辨率，如 720")
+    quality: int = Query(None, description="分辨率，如 720"),
+    cookie: str = Query(None, description="Cookie字符串，用于解决登录限制")
 ):
     """
     服务器中转下载
@@ -160,11 +180,21 @@ async def download_video(
             "postprocessor_args": {
                 "ffmpeg": ["-c:a", "aac", "-b:a", "192k"]
             },
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web", "ios", "tv"],
+                    "player_skip": ["configs"]
+                }
+            }
         }
+        
+        if cookie:
+            ydl_opts["cookies"] = cookie
         
         # 下载视频
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(url, download=False)
+            ydl.download([url])
             
             # 获取实际下载的文件路径
             # yt-dlp 可能会返回 requested_downloads 或直接在 info 中
