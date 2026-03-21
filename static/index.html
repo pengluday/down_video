@@ -25,6 +25,13 @@
                 <a href="#features" class="nav-link">功能</a>
                 <a href="#platforms" class="nav-link">支持平台</a>
                 <a href="#faq" class="nav-link">FAQ</a>
+                <button id="historyBtn" class="nav-link history-btn" title="下载历史">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                    <span>历史记录</span>
+                </button>
             </nav>
         </header>
 
@@ -243,6 +250,23 @@
     <div id="toast" class="toast hidden">
         <span id="toastMessage"></span>
     </div>
+
+    <!-- History Sidebar -->
+    <div id="historySidebar" class="history-sidebar hidden">
+        <div class="sidebar-header">
+            <h3>下载历史记录</h3>
+            <button id="closeHistoryBtn" class="close-btn">×</button>
+        </div>
+        <div class="sidebar-content">
+            <div id="historyList" class="history-list">
+                <div class="history-empty">暂无下载记录</div>
+            </div>
+        </div>
+        <div class="sidebar-footer">
+            <button id="clearHistoryBtn" class="btn-clear-history">清空历史记录</button>
+        </div>
+    </div>
+    <div id="historyOverlay" class="history-overlay hidden"></div>
 
     <script src="/static/app.js?v=20260320"></script>
 </body>

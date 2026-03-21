@@ -16,6 +16,14 @@ const progressText = document.querySelector(".progress-text");
 const toast = document.getElementById("toast");
 const toastMessage = document.getElementById("toastMessage");
 
+// History DOM Elements
+const historyBtn = document.getElementById("historyBtn");
+const historySidebar = document.getElementById("historySidebar");
+const historyOverlay = document.getElementById("historyOverlay");
+const closeHistoryBtn = document.getElementById("closeHistoryBtn");
+const clearHistoryBtn = document.getElementById("clearHistoryBtn");
+const historyList = document.getElementById("historyList");
+
 // State
 let currentVideoInfo = null;
 let currentVideoUrl = null;
@@ -400,3 +408,151 @@ document.querySelectorAll('a[href^="#"]').forEach((anchor) => {
         }
     });
 });
+
+// ============= History Functions =============
+
+// History Event Listeners
+if (historyBtn) {
+    historyBtn.addEventListener("click", openHistorySidebar);
+}
+
+if (closeHistoryBtn) {
+    closeHistoryBtn.addEventListener("click", closeHistorySidebar);
+}
+
+if (historyOverlay) {
+    historyOverlay.addEventListener("click", closeHistorySidebar);
+}
+
+if (clearHistoryBtn) {
+    clearHistoryBtn.addEventListener("click", clearHistory);
+}
+
+// Open History Sidebar
+function openHistorySidebar() {
+    if (historySidebar && historyOverlay) {
+        historySidebar.classList.remove("hidden");
+        historyOverlay.classList.remove("hidden");
+        loadHistory();
+    }
+}
+
+// Close History Sidebar
+function closeHistorySidebar() {
+    if (historySidebar && historyOverlay) {
+        historySidebar.classList.add("hidden");
+        historyOverlay.classList.add("hidden");
+    }
+}
+
+// Load History
+async function loadHistory() {
+    try {
+        const response = await fetch("/api/history?limit=100");
+        const data = await response.json();
+        
+        if (data.success && data.records) {
+            renderHistory(data.records);
+        } else {
+            if (historyList) {
+                historyList.innerHTML = '<div class="history-empty">暂无下载记录</div>';
+            }
+        }
+    } catch (error) {
+        console.error("加载历史记录失败:", error);
+        if (historyList) {
+            historyList.innerHTML = '<div class="history-empty">加载失败，请稍后重试</div>';
+        }
+    }
+}
+
+// Render History
+function renderHistory(records) {
+    if (!historyList) return;
+    
+    if (records.length === 0) {
+        historyList.innerHTML = '<div class="history-empty">暂无下载记录</div>';
+        return;
+    }
+    
+    historyList.innerHTML = records.map(record => {
+        const date = new Date(record.download_time * 1000);
+        const timeStr = formatHistoryTime(date);
+        const sizeStr = formatFileSize(record.file_size);
+        
+        return `
+            <div class="history-item">
+                <div class="history-item-header">
+                    <div class="history-item-title">${escapeHtml(record.video_title)}</div>
+                    <div class="history-item-platform">${escapeHtml(record.platform || 'unknown')}</div>
+                </div>
+                <div class="history-item-meta">
+                    <span>📅 ${timeStr}</span>
+                    <span>📦 ${sizeStr}</span>
+                    ${record.duration ? `<span>⏱️ ${formatDuration(record.duration)}</span>` : ''}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+// Format History Time
+function formatHistoryTime(date) {
+    const now = new Date();
+    const diff = now - date;
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+    
+    if (minutes < 1) return "刚刚";
+    if (minutes < 60) return `${minutes}分钟前`;
+    if (hours < 24) return `${hours}小时前`;
+    if (days < 7) return `${days}天前`;
+    
+    return date.toLocaleDateString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+// Format File Size
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+}
+
+// Escape HTML
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Clear History
+async function clearHistory() {
+    if (!confirm("确定要清空所有历史记录吗？")) {
+        return;
+    }
+    
+    try {
+        const response = await fetch("/api/history", {
+            method: "DELETE"
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast(`已清空 ${data.deleted} 条历史记录`, "success");
+            loadHistory();
+        } else {
+            showToast("清空历史记录失败", "error");
+        }
+    } catch (error) {
+        console.error("清空历史记录失败:", error);
+        showToast("清空历史记录失败", "error");
+    }
+}

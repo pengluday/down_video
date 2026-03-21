@@ -29,6 +29,8 @@ from starlette.background import BackgroundTask
 import uvicorn
 import yt_dlp
 
+from history import history_db, start_cleanup_scheduler
+
 
 # 配置日志
 logging.basicConfig(
@@ -338,6 +340,28 @@ def run_download_job(job_id: str) -> None:
                     current.speed = None
                     current.eta = None
                     current.updated_at = time.time()
+
+            try:
+                platform = "unknown"
+                if job.url:
+                    url_lower = job.url.lower()
+                    if "youtube" in url_lower:
+                        platform = "youtube"
+                    elif "tiktok" in url_lower:
+                        platform = "tiktok"
+                    elif "bilibili" in url_lower:
+                        platform = "bilibili"
+                
+                history_db.add_record(
+                    video_title=title,
+                    file_size=file_size,
+                    download_url=job.url,
+                    platform=platform,
+                    duration=info.get("duration")
+                )
+                logger.info(f"[History] 已保存下载历史: {title}")
+            except Exception as e:
+                logger.error(f"[History] 保存历史记录失败: {e}")
 
             logger.info(
                 "[Download] 任务完成: %s 文件=%s 大小=%.2fMB",
@@ -685,6 +709,52 @@ async def health_check():
     }
 
 
+# ============= 历史记录API =============
+
+@app.get("/api/history")
+async def get_history(limit: int = Query(100, ge=1, le=500)):
+    """获取下载历史记录"""
+    try:
+        records = history_db.get_records(limit=limit)
+        return {
+            "success": True,
+            "records": records,
+            "total": len(records)
+        }
+    except Exception as e:
+        logger.error(f"获取历史记录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取历史记录失败: {str(e)}")
+
+
+@app.delete("/api/history")
+async def clear_history():
+    """清空所有历史记录"""
+    try:
+        deleted = history_db.delete_old_records(days=0)
+        return {
+            "success": True,
+            "deleted": deleted,
+            "message": f"已清空 {deleted} 条历史记录"
+        }
+    except Exception as e:
+        logger.error(f"清空历史记录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"清空历史记录失败: {str(e)}")
+
+
+@app.get("/api/history/stats")
+async def get_history_stats():
+    """获取历史记录统计信息"""
+    try:
+        stats = history_db.get_stats()
+        return {
+            "success": True,
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"获取历史记录统计失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
+
+
 # ============= 静态文件服务 =============
 
 def resolve_static_dir() -> Path:
@@ -715,6 +785,7 @@ def open_browser():
 
 
 if __name__ == "__main__":
+    start_cleanup_scheduler()
     threading.Timer(1.5, open_browser).start()
     uvicorn.run(app, host="127.0.0.1", port=8000)
     print("Server started: http://127.0.0.1:8000")
