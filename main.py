@@ -1,6 +1,6 @@
 """
-视频下载工具 - 任务队列模式
-服务器负责下载视频并转发给用户
+视频下载工具 - 商业化版本
+使用License Key系统替代用户登录系统
 
 架构：浏览器 -> FastAPI 任务接口 -> 后台下载线程 -> 浏览器拉取文件
 """
@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import quote
 import asyncio
 import logging
+import logging.handlers
 import os
 import shutil
 import sys
@@ -20,9 +21,9 @@ import time
 import uuid
 import webbrowser
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
@@ -30,13 +31,74 @@ import uvicorn
 import yt_dlp
 
 from history import history_db, start_cleanup_scheduler
-
-
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+from models import SubscriptionTier, SubscriptionCreate
+from database import init_database
+from rate_limiter import (
+    check_download_allowed, get_user_limits_info,
+    record_download, get_client_ip, RateLimitExceeded, QuotaExceeded
 )
+from license import (
+    create_license, verify_license, activate_license,
+    get_license_info, revoke_license, get_license_by_stripe_session
+)
+from payment import (
+    create_customer, create_checkout_session, get_price_info,
+    construct_webhook_event, handle_webhook_event, PaymentError
+)
+
+
+# ============= 日志配置 =============
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+def setup_logging():
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    console_handler.addFilter(lambda record: record.levelno < logging.ERROR)
+    root_logger.addHandler(console_handler)
+    
+    error_handler = logging.StreamHandler(sys.stderr)
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(formatter)
+    root_logger.addHandler(error_handler)
+    
+    file_handler = logging.handlers.RotatingFileHandler(
+        LOG_DIR / "app.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8"
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+    
+    error_file_handler = logging.handlers.RotatingFileHandler(
+        LOG_DIR / "error.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8"
+    )
+    error_file_handler.setLevel(logging.ERROR)
+    error_file_handler.setFormatter(formatter)
+    root_logger.addHandler(error_file_handler)
+    
+    logging.getLogger("yt_dlp").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("stripe").setLevel(logging.WARNING)
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -57,6 +119,7 @@ class DownloadJob:
     format_id: str | None
     quality: int | None
     cookie: str | None
+    user_id: str | None = None
     client_id: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -117,14 +180,18 @@ def format_speed(speed_bytes: float | None) -> str | None:
     return f"{speed_bytes / 1024:.2f} KB/s"
 
 
-def build_format_string(format_id: str | None, quality: int | None) -> str:
+def build_format_string(format_id: str | None, quality: int | None, max_quality: int = 1080) -> str:
+    # 限制质量不超过用户允许的最大值
+    if quality and quality > max_quality:
+        quality = max_quality
+    
     if format_id:
         if "+" in format_id:
             return format_id
         return f"{format_id}+bestaudio/best"
     if quality:
         return f"best[height<={quality}]+bestaudio/best[height<={quality}]/best"
-    return "best+bestaudio/best"
+    return f"best[height<={max_quality}]+bestaudio/best[height<={max_quality}]/best"
 
 
 def cleanup_job_files(job: DownloadJob) -> None:
@@ -200,7 +267,21 @@ def run_download_job(job_id: str) -> None:
         if job_id in DOWNLOAD_JOBS:
             DOWNLOAD_JOBS[job_id].work_dir = str(work_dir)
 
-    format_str = build_format_string(job.format_id, job.quality)
+    # 获取用户限制
+    max_quality = 1080
+    if job.user_id:
+        # user_id可能是License Key
+        from license import verify_license
+        is_valid, license_info = verify_license(job.user_id)
+        if is_valid:
+            from models import SUBSCRIPTION_LIMITS, SubscriptionTier
+            tier_value = license_info.get('tier', 'free')
+            tier = SubscriptionTier(tier_value) if tier_value in [t.value for t in SubscriptionTier] else SubscriptionTier.FREE
+            limits = SUBSCRIPTION_LIMITS.get(tier)
+            if limits:
+                max_quality = limits.max_resolution
+
+    format_str = build_format_string(job.format_id, job.quality, max_quality)
 
     def progress_hook(data: dict) -> None:
         with JOB_LOCK:
@@ -422,8 +503,8 @@ def mark_job_downloaded(job_id: str) -> None:
 
 app = FastAPI(
     title="Video Downloader API",
-    description="服务器中转视频下载服务",
-    version="6.0.0",
+    description="服务器中转视频下载服务 - 商业化版本",
+    version="7.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
 )
@@ -438,21 +519,130 @@ app.add_middleware(
 )
 
 
-# ============= API 路由 =============
+# ============= License Key API =============
+
+@app.get("/api/pricing")
+async def get_pricing():
+    """获取定价信息"""
+    return {
+        "success": True,
+        "pricing": get_price_info(),
+        "features": {
+            "free": {
+                "max_resolution": "480p",
+                "daily_downloads": 5,
+                "speed": "300KB/s",
+                "ads": True,
+                "priority": False
+            },
+            "pro": {
+                "max_resolution": "1080p",
+                "daily_downloads": "无限",
+                "speed": "不限速",
+                "ads": False,
+                "priority": True
+            }
+        }
+    }
+
+
+@app.post("/api/subscription/checkout")
+async def create_subscription_checkout(
+    sub_data: SubscriptionCreate,
+    request: Request
+):
+    """创建订阅结账会话（无需登录）"""
+    try:
+        # 创建结账会话（不需要用户ID，使用metadata传递）
+        success_url = f"http://127.0.0.1:9001/subscription/success?session_id={{CHECKOUT_SESSION_ID}}"
+        cancel_url = "http://127.0.0.1:9001/subscription/cancel"
+        
+        # 生成临时License Key（支付成功后激活）
+        temp_license_key, _ = create_license(
+            tier='pro' if 'yearly' not in sub_data.price_id.lower() else 'pro_yearly',
+            expires_days=365
+        )
+        
+        session = create_checkout_session(
+            customer_id=None,  # 不需要客户ID
+            price_id=sub_data.price_id,
+            user_id=None,  # 不需要用户ID
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                "license_key": temp_license_key
+            }
+        )
+        
+        # 更新License Key的Stripe会话ID
+        from license import init_license_db
+        import sqlite3
+        DB_PATH = Path(__file__).parent / "licenses.db"
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE licenses SET stripe_session_id = ? 
+            WHERE license_key = ?
+        """, (session.id, temp_license_key))
+        conn.commit()
+        conn.close()
+        
+        return {
+            "success": True,
+            "checkout_url": session.url,
+            "session_id": session.id
+        }
+    except PaymentError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e.detail)
+        )
+
+
+@app.post("/api/webhook/stripe")
+async def stripe_webhook(request: Request):
+    """Stripe Webhook处理"""
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    
+    if not sig_header:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="缺少签名"
+        )
+    
+    try:
+        event = construct_webhook_event(payload, sig_header)
+        handled = handle_webhook_event(event)
+        
+        return {
+            "success": True,
+            "handled": handled,
+            "event_type": event.type
+        }
+    except PaymentError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e.detail)
+        )
+
+
+# ============= 下载 API =============
 
 @app.get("/api/info")
 async def get_video_info(
     request: Request,
     url: str = Query(..., description="视频链接"),
-    cookie: str = Query(None, description="Cookie字符串，用于解决登录限制"),
+    cookie: str = Query(None, description="Cookie字符串，用于解决登录限制")
 ):
     """
     解析视频信息
-
     返回视频标题、可用格式等信息
     """
     start_time = time.time()
     client_id = request.headers.get("X-Client-ID", "")
+    license_key = request.headers.get("X-License-Key")
+    
     logger.info("[API] 解析视频: %s (客户端: %s)", url, client_id)
 
     try:
@@ -478,19 +668,29 @@ async def get_video_info(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
+        # 验证License Key
+        license_info = None
+        if license_key:
+            is_valid, license_info = verify_license(license_key)
+            if not is_valid:
+                license_info = None
+
         formats = []
         for item in info.get("formats", []):
             height = item.get("height")
             if item.get("vcodec") != "none" and height:
-                formats.append(
-                    {
-                        "format_id": item["format_id"],
-                        "height": height,
-                        "ext": item.get("ext", "mp4"),
-                        "has_audio": item.get("acodec") != "none",
-                        "filesize": item.get("filesize") or item.get("filesize_approx"),
-                    }
-                )
+                # 检查分辨率是否超过用户限制
+                limits_info = get_user_limits_info(license_info)
+                if height <= limits_info["max_resolution"]:
+                    formats.append(
+                        {
+                            "format_id": item["format_id"],
+                            "height": height,
+                            "ext": item.get("ext", "mp4"),
+                            "has_audio": item.get("acodec") != "none",
+                            "filesize": item.get("filesize") or item.get("filesize_approx"),
+                        }
+                    )
 
         formats.sort(key=lambda x: (x["height"], x.get("has_audio", False)), reverse=True)
 
@@ -506,12 +706,16 @@ async def get_video_info(
         elapsed = time.time() - start_time
         logger.info("[API] 解析完成，耗时: %.2fs, 找到 %s 个格式", elapsed, len(formats))
 
+        # 获取用户限制信息
+        limits_info = get_user_limits_info(license_info)
+
         return {
             "title": info.get("title", "Unknown"),
             "formats": formats,
             "thumbnail": info.get("thumbnail"),
             "platform": platform,
             "duration": info.get("duration"),
+            "limits": limits_info
         }
 
     except yt_dlp.utils.DownloadError as ex:
@@ -527,14 +731,51 @@ async def get_video_info(
 
 
 @app.post("/api/download")
-async def start_download_task(request: Request, request_data: DownloadStartRequest):
+async def start_download_task(
+    request: Request,
+    request_data: DownloadStartRequest
+):
     """
     创建下载任务（异步），立即返回 job_id
+    需要用户登录，检查配额和权限
     """
     cleanup_expired_jobs()
 
     if not request_data.url:
         raise HTTPException(status_code=400, detail="url 不能为空")
+
+    # 获取License Key
+    license_key = request.headers.get("X-License-Key")
+    license_info = None
+    if license_key:
+        is_valid, license_info = verify_license(license_key)
+        if not is_valid:
+            license_info = None
+
+    # 检查下载权限
+    try:
+        ip_address, limits_info = await check_download_allowed(request, license_info)
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=e.detail,
+            headers=e.headers
+        )
+    except QuotaExceeded as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=e.detail
+        )
+
+    # 检查分辨率权限
+    if request_data.quality:
+        from rate_limiter import check_resolution_allowed
+        allowed, reason, max_res = check_resolution_allowed(license_info, request_data.quality)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=reason
+            )
 
     client_id = request.headers.get("X-Client-ID", "")
     job_id = uuid.uuid4().hex
@@ -544,6 +785,7 @@ async def start_download_task(request: Request, request_data: DownloadStartReque
         format_id=request_data.format_id,
         quality=request_data.quality,
         cookie=request_data.cookie,
+        user_id=license_info['license_key'] if license_info else None,
         client_id=client_id,
     )
 
@@ -552,131 +794,59 @@ async def start_download_task(request: Request, request_data: DownloadStartReque
         future = DOWNLOAD_EXECUTOR.submit(run_download_job, job_id)
         DOWNLOAD_JOBS[job_id].future = future
 
-    logger.info("[API] 创建下载任务: %s (客户端: %s)", job_id, client_id)
+    # 记录下载
+    record_download(ip_address)
+
+    logger.info("[API] 创建下载任务: %s (客户端: %s, License: %s)", 
+                job_id, client_id, license_info['license_key'] if license_info else "未激活")
+    
     return {
         "job_id": job_id,
         "status": "queued",
+        "limits": limits_info
     }
 
 
-@app.get("/api/download")
-async def legacy_download_video(
-    request: Request,
-    url: str = Query(..., description="视频链接"),
-    format_id: str = Query(None, description="格式ID，如 136 (720p)"),
-    quality: int = Query(None, description="分辨率，如 720"),
-    cookie: str = Query(None, description="Cookie字符串，用于解决登录限制"),
-):
-    """
-    兼容旧版前端：GET /api/download?url=...&format_id=...
-    内部走新任务系统，等待任务完成后直接返回文件流。
-    """
-    cleanup_expired_jobs()
-
-    client_id = request.headers.get("X-Client-ID", "")
-    job_id = uuid.uuid4().hex
-    job = DownloadJob(
-        job_id=job_id,
-        url=url,
-        format_id=format_id,
-        quality=quality,
-        cookie=cookie,
-        client_id=client_id,
-    )
-
-    with JOB_LOCK:
-        DOWNLOAD_JOBS[job_id] = job
-        future = DOWNLOAD_EXECUTOR.submit(run_download_job, job_id)
-        DOWNLOAD_JOBS[job_id].future = future
-
-    max_wait_seconds = 2 * 60 * 60
-    start_wait = time.time()
-
-    while True:
-        current = get_job_or_404(job_id)
-
-        if current.status == "ready":
-            if not current.file_path:
-                raise HTTPException(status_code=500, detail="下载失败：任务完成但文件不存在")
-
-            file_path = Path(current.file_path)
-            if not file_path.exists():
-                raise HTTPException(status_code=500, detail="下载失败：输出文件不存在")
-
-            filename = current.filename or file_path.name
-
-            return FileResponse(
-                path=file_path,
-                media_type="application/octet-stream",
-                headers={
-                    "Content-Disposition": build_content_disposition(filename),
-                    "Cache-Control": "no-cache",
-                },
-                background=BackgroundTask(mark_job_downloaded, job_id),
-            )
-
-        if current.status in {"failed", "canceled", "completed"}:
-            raise HTTPException(status_code=500, detail=current.error or f"下载失败: {current.status}")
-
-        if time.time() - start_wait > max_wait_seconds:
-            raise HTTPException(status_code=504, detail="下载超时，请稍后重试")
-
-        await asyncio.sleep(0.5)
-
-
 @app.get("/api/download/{job_id}")
-async def get_download_status(job_id: str):
+async def get_download_status(
+    job_id: str,
+    request: Request
+):
     """
     查询下载任务状态和进度
     """
     cleanup_expired_jobs()
     job = get_job_or_404(job_id)
+    
+    client_id = request.headers.get("X-Client-ID", "")
+    
+    if job.client_id and job.client_id != client_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权访问此任务"
+        )
+    
     return serialize_job(job)
 
 
-@app.post("/api/download/{job_id}/cancel")
-async def cancel_download_task(job_id: str):
-    """
-    取消下载任务
-    """
-    job = get_job_or_404(job_id)
-
-    should_cleanup = False
-
-    with JOB_LOCK:
-        current = DOWNLOAD_JOBS.get(job_id)
-        if not current:
-            raise HTTPException(status_code=404, detail="任务不存在")
-
-        if current.status in {"ready", "completed", "failed", "canceled"}:
-            return {"job_id": job_id, "status": current.status}
-
-        current.cancel_event.set()
-        if current.status == "queued":
-            if current.future and current.future.cancel():
-                current.status = "canceled"
-                current.stage = "canceled"
-                current.error = "下载已取消"
-                current.updated_at = time.time()
-                should_cleanup = True
-
-        if not should_cleanup:
-            current.status = "canceling"
-            current.stage = "canceling"
-            current.updated_at = time.time()
-
-    if should_cleanup:
-        cleanup_job_files(job)
-        return {"job_id": job_id, "status": "canceled"}
-    return {"job_id": job_id, "status": "canceling"}
-
-
 @app.get("/api/download/{job_id}/file")
-async def download_task_file(job_id: str):
+async def download_task_file(
+    job_id: str,
+    request: Request
+):
     """
     下载任务生成的文件（只允许下载一次）
     """
     job = get_job_or_404(job_id)
+    
+    client_id = request.headers.get("X-Client-ID", "")
+    
+    if job.client_id and job.client_id != client_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权访问此文件"
+        )
+    
     if job.status != "ready":
         raise HTTPException(status_code=409, detail="任务未完成，无法下载文件")
     if not job.file_path:
@@ -699,6 +869,54 @@ async def download_task_file(job_id: str):
     )
 
 
+# ============= 历史记录 API =============
+
+@app.get("/api/history")
+async def get_history(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500)
+):
+    """获取当前客户端的下载历史记录"""
+    try:
+        client_id = request.headers.get("X-Client-ID", "")
+        
+        if client_id:
+            records = history_db.get_records_by_client(client_id, limit=limit)
+        else:
+            records = history_db.get_records(limit=limit)
+        
+        return {
+            "success": True,
+            "records": records,
+            "total": len(records)
+        }
+    except Exception as e:
+        logger.error(f"获取历史记录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取历史记录失败: {str(e)}")
+
+
+@app.get("/api/history/stats")
+async def get_history_stats(request: Request):
+    """获取当前客户端的历史记录统计信息"""
+    try:
+        client_id = request.headers.get("X-Client-ID", "")
+        
+        if client_id:
+            stats = history_db.get_client_stats(client_id)
+        else:
+            stats = history_db.get_stats()
+        
+        return {
+            "success": True,
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"获取历史记录统计失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
+
+
+# ============= 系统 API =============
+
 @app.get("/api/health")
 async def health_check():
     """健康检查接口"""
@@ -710,8 +928,8 @@ async def health_check():
     return {
         "status": "ok",
         "service": "video-downloader-api",
-        "version": "6.0.0",
-        "mode": "task-queue",
+        "version": "7.0.0",
+        "mode": "commercial",
         "timestamp": time.time(),
         "max_workers": MAX_DOWNLOAD_WORKERS,
         "active_jobs": active_jobs,
@@ -719,80 +937,139 @@ async def health_check():
     }
 
 
-# ============= 历史记录API =============
+@app.get("/api/limits")
+async def get_limits(request: Request):
+    """获取当前用户的限制信息"""
+    license_key = request.headers.get("X-License-Key")
+    
+    if license_key:
+        is_valid, license_info = verify_license(license_key)
+        if is_valid:
+            limits_info = get_user_limits_info(license_info)
+        else:
+            limits_info = get_user_limits_info(None)
+    else:
+        limits_info = get_user_limits_info(None)
+    
+    return {
+        "success": True,
+        "limits": limits_info
+    }
 
-@app.get("/api/history")
-async def get_history(limit: int = Query(100, ge=1, le=500)):
-    """获取下载历史记录"""
+
+# ============= License Key API =============
+
+@app.post("/api/license/activate")
+async def activate_license_endpoint(request: Request):
+    """激活License Key"""
     try:
-        records = history_db.get_records(limit=limit)
+        data = await request.json()
+        license_key = data.get("license_key")
+        
+        if not license_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="缺少License Key"
+            )
+        
+        success, message = activate_license(license_key)
+        
+        if success:
+            return {
+                "success": True,
+                "message": message
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=message
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@app.get("/api/license/info")
+async def get_license_info_endpoint(request: Request):
+    """获取License Key信息"""
+    license_key = request.headers.get("X-License-Key")
+    
+    if not license_key:
         return {
             "success": True,
-            "records": records,
-            "total": len(records)
+            "is_pro": False,
+            "license": None
         }
-    except Exception as e:
-        logger.error(f"获取历史记录失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取历史记录失败: {str(e)}")
-
-
-@app.get("/api/history/client/{client_id}")
-async def get_client_history(client_id: str, limit: int = Query(100, ge=1, le=500)):
-    """获取指定客户端的下载历史记录"""
-    try:
-        records = history_db.get_records_by_client(client_id=client_id, limit=limit)
+    
+    is_valid, license_info = verify_license(license_key)
+    
+    if is_valid:
         return {
             "success": True,
-            "client_id": client_id,
-            "records": records,
-            "total": len(records)
+            "is_pro": True,
+            "license": license_info
         }
-    except Exception as e:
-        logger.error(f"获取客户端历史记录失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取客户端历史记录失败: {str(e)}")
-
-
-@app.get("/api/history/client/{client_id}/stats")
-async def get_client_stats(client_id: str):
-    """获取指定客户端的下载统计信息"""
-    try:
-        stats = history_db.get_client_stats(client_id=client_id)
+    else:
         return {
             "success": True,
-            "stats": stats
+            "is_pro": False,
+            "license": None
         }
-    except Exception as e:
-        logger.error(f"获取客户端统计信息失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取客户端统计信息失败: {str(e)}")
 
 
-@app.delete("/api/history")
-async def clear_history():
-    """清空所有历史记录"""
-    try:
-        deleted = history_db.delete_old_records(days=0)
+@app.get("/api/license/by-session/{session_id}")
+async def get_license_by_session_endpoint(session_id: str):
+    """通过Stripe会话ID获取License Key"""
+    license_key = get_license_by_stripe_session(session_id)
+    
+    if license_key:
         return {
             "success": True,
-            "deleted": deleted,
-            "message": f"已清空 {deleted} 条历史记录"
+            "license_key": license_key
         }
-    except Exception as e:
-        logger.error(f"清空历史记录失败: {e}")
-        raise HTTPException(status_code=500, detail=f"清空历史记录失败: {str(e)}")
-
-
-@app.get("/api/history/stats")
-async def get_history_stats():
-    """获取历史记录统计信息"""
-    try:
-        stats = history_db.get_stats()
+    else:
         return {
-            "success": True,
-            "stats": stats
+            "success": False,
+            "message": "未找到对应的License Key"
         }
+
+
+@app.post("/api/license/verify")
+async def verify_license_endpoint(request: Request):
+    """验证License Key"""
+    try:
+        data = await request.json()
+        license_key = data.get("license_key")
+        
+        if not license_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="缺少License Key"
+            )
+        
+        is_valid, license_info = verify_license(license_key)
+        
+        if is_valid:
+            return {
+                "success": True,
+                "is_valid": True,
+                "license": license_info
+            }
+        else:
+            return {
+                "success": True,
+                "is_valid": False,
+                "license": None
+            }
     except Exception as e:
-        logger.error(f"获取历史记录统计失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 
 # ============= 静态文件服务 =============
@@ -821,11 +1098,13 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # ============= 启动入口 =============
 
 def open_browser():
-    webbrowser.open("http://47.99.72.247:9001")
+    webbrowser.open("http://127.0.0.1:9001")
 
 
 if __name__ == "__main__":
+    # 初始化数据库
+    init_database()
     start_cleanup_scheduler()
     threading.Timer(1.5, open_browser).start()
-    uvicorn.run(app, host="47.99.72.247", port=9001)
-    print("Server started: http://47.99.72.247:9001")
+    uvicorn.run(app, host="127.0.0.1", port=9001)
+    print("Server started: http://127.0.0.1:9001")

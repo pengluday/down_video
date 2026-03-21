@@ -1,15 +1,20 @@
 // 视频下载器 - 简化版
 // 只作为入口，所有解析和下载功能由后端处理
 
-const API_BASE = 'http://47.99.72.247:9001';
+const API_BASE = 'http://127.0.0.1:9001';
 const CLIENT_ID_KEY = 'video_downloader_client_id';
+const LICENSE_KEY_KEY = 'video_downloader_license_key';
 
 let currentJobId = null;
-let pollInterval = null;
+let pollTimeout = null;
 let selectedFormatId = null;
 let videoFormats = [];
 let clientId = null;
 let isClientIdReady = false;
+let licenseKey = null;
+let isPro = false;
+let pollCount = 0;
+const MAX_POLL_COUNT = 3600;
 
 // DOM 元素
 const urlInput = document.getElementById('urlInput');
@@ -25,6 +30,10 @@ const videoTitle = document.getElementById('videoTitle');
 const videoPlatform = document.getElementById('videoPlatform');
 const videoDuration = document.getElementById('videoDuration');
 const formatList = document.getElementById('formatList');
+const licenseKeyInput = document.getElementById('licenseKeyInput');
+const activateBtn = document.getElementById('activateBtn');
+const licenseStatus = document.getElementById('licenseStatus');
+const proBadge = document.getElementById('proBadge');
 
 // 生成唯一的客户端ID
 function generateClientId() {
@@ -41,69 +50,240 @@ async function getOrCreateClientId() {
     const result = await chrome.storage.local.get(CLIENT_ID_KEY);
     if (result[CLIENT_ID_KEY]) {
       clientId = result[CLIENT_ID_KEY];
-      console.log('已存在客户端ID:', clientId);
     } else {
       clientId = generateClientId();
       await chrome.storage.local.set({ [CLIENT_ID_KEY]: clientId });
-      console.log('已创建新客户端ID:', clientId);
     }
     isClientIdReady = true;
     return clientId;
   } catch (error) {
     console.error('获取客户端ID失败:', error);
-    clientId = generateClientId();
-    isClientIdReady = true;
-    return clientId;
+    return null;
   }
+}
+
+// 获取或创建License Key
+async function getOrCreateLicenseKey() {
+  try {
+    const result = await chrome.storage.local.get(LICENSE_KEY_KEY);
+    if (result[LICENSE_KEY_KEY]) {
+      licenseKey = result[LICENSE_KEY_KEY];
+      licenseKeyInput.value = licenseKey;
+      await verifyLicenseKey();
+    }
+  } catch (error) {
+    console.error('获取License Key失败:', error);
+  }
+}
+
+// 验证License Key
+async function verifyLicenseKey() {
+  if (!licenseKey) {
+    isPro = false;
+    proBadge.classList.add('hidden');
+    return false;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/api/license/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        license_key: licenseKey
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.success && data.is_valid) {
+      isPro = true;
+      proBadge.classList.remove('hidden');
+      showLicenseStatus('success', 'License Key已激活，享受Pro特权！');
+      return true;
+    } else {
+      isPro = false;
+      proBadge.classList.add('hidden');
+      showLicenseStatus('error', 'License Key无效或已过期');
+      return false;
+    }
+  } catch (error) {
+    console.error('验证License Key失败:', error);
+    isPro = false;
+    proBadge.classList.add('hidden');
+    showLicenseStatus('error', '验证失败，请检查网络连接');
+    return false;
+  }
+}
+
+// 激活License Key
+async function activateLicenseKey() {
+  const key = licenseKeyInput.value.trim().toUpperCase();
+
+  if (!key) {
+    showLicenseStatus('error', '请输入License Key');
+    return;
+  }
+
+  // 验证格式
+  const keyFormat = /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+  if (!keyFormat.test(key)) {
+    showLicenseStatus('error', 'License Key格式错误，应为XXXX-XXXX-XXXX-XXXX');
+    return;
+  }
+
+  activateBtn.disabled = true;
+  activateBtn.textContent = '激活中...';
+
+  try {
+    const response = await fetch(`${API_BASE}/api/license/activate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        license_key: key
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.success) {
+      licenseKey = key;
+      await chrome.storage.local.set({ [LICENSE_KEY_KEY]: key });
+      isPro = true;
+      proBadge.classList.remove('hidden');
+      showLicenseStatus('success', '激活成功！享受Pro特权');
+    } else {
+      isPro = false;
+      proBadge.classList.add('hidden');
+      showLicenseStatus('error', data.detail || '激活失败');
+    }
+  } catch (error) {
+    console.error('激活License Key失败:', error);
+    showLicenseStatus('error', '激活失败，请检查网络连接');
+  } finally {
+    activateBtn.disabled = false;
+    activateBtn.textContent = '激活';
+  }
+}
+
+// 显示License状态
+function showLicenseStatus(type, message) {
+  licenseStatus.textContent = message;
+  licenseStatus.className = `license-status ${type}`;
+  licenseStatus.classList.remove('hidden');
+
+  // 3秒后自动隐藏成功消息
+  if (type === 'success') {
+    setTimeout(() => {
+      licenseStatus.classList.add('hidden');
+    }, 3000);
+  }
+}
+
+// 获取请求头（包含License Key）
+function getRequestHeaders() {
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Client-ID': clientId
+  };
+
+  if (licenseKey) {
+    headers['X-License-Key'] = licenseKey;
+  }
+
+  return headers;
 }
 
 // 创建带客户端标识的请求头
 function createHeaders() {
   if (!isClientIdReady || !clientId) {
-    console.warn('客户端ID未准备好，使用临时ID');
-    return {
+    const headers = {
       'Content-Type': 'application/json',
       'X-Client-ID': generateClientId(),
       'X-Client-Type': 'chrome-extension',
       'X-Client-Version': '2.0.0'
     };
+    
+    if (licenseKey) {
+      headers['X-License-Key'] = licenseKey;
+    }
+    
+    return headers;
   }
   
-  console.log('发送请求，客户端ID:', clientId);
-  return {
+  const headers = {
     'Content-Type': 'application/json',
     'X-Client-ID': clientId,
     'X-Client-Type': 'chrome-extension',
     'X-Client-Version': '2.0.0'
   };
+  
+  if (licenseKey) {
+    headers['X-License-Key'] = licenseKey;
+  }
+  
+  return headers;
 }
 
 // 确保客户端ID已初始化
 async function ensureClientIdReady() {
   if (!isClientIdReady) {
-    console.log('等待客户端ID初始化...');
     await getOrCreateClientId();
   }
-  console.log('客户端ID已就绪:', clientId);
   return clientId;
+}
+
+// 请求必要的权限
+function requestPermissions(url) {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const origin = `${urlObj.protocol}//${urlObj.host}/*`;
+    
+    chrome.permissions.request({
+      origins: [origin]
+    }, (granted) => {
+      if (granted) {
+        resolve(true);
+      } else {
+        reject(new Error('权限被拒绝'));
+      }
+    });
+  });
+}
+
+// 检查是否有权限
+function hasPermission(url) {
+  return new Promise((resolve) => {
+    const urlObj = new URL(url);
+    const origin = `${urlObj.protocol}//${urlObj.host}/*`;
+    
+    chrome.permissions.contains({
+      origins: [origin]
+    }, (result) => {
+      resolve(result);
+    });
+  });
 }
 
 // 页面加载时初始化
 document.addEventListener('DOMContentLoaded', async () => {
-  // 初始化客户端ID
   await getOrCreateClientId();
+  await getOrCreateLicenseKey();
   
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab && tab.url) {
-      // 自动填充当前页面的URL
       urlInput.value = tab.url;
-      console.log('已自动填充当前页面URL:', tab.url);
     }
   } catch (error) {
-    console.error('获取当前标签页失败:', error);
   }
 });
+
+// 激活按钮事件
+activateBtn.addEventListener('click', activateLicenseKey);
 
 // 显示状态
 function showStatus(message, type = 'loading') {
@@ -150,7 +330,6 @@ function formatDuration(seconds) {
 
 // 解析视频
 async function parseVideo() {
-  // 确保客户端ID已就绪
   await ensureClientIdReady();
   
   const url = urlInput.value.trim();
@@ -166,6 +345,19 @@ async function parseVideo() {
   hideProgress();
   
   try {
+    const hasPerm = await hasPermission(url);
+    if (!hasPerm) {
+      showStatus('需要访问该网站的权限，请点击允许', 'info');
+      try {
+        await requestPermissions(url);
+      } catch (error) {
+        showStatus('需要权限才能继续', 'error');
+        downloadBtn.disabled = false;
+        downloadBtn.textContent = '解析视频';
+        return;
+      }
+    }
+    
     const response = await fetch(`${API_BASE}/api/info?url=${encodeURIComponent(url)}`, {
       method: 'GET',
       headers: createHeaders()
@@ -178,19 +370,14 @@ async function parseVideo() {
     
     const data = await response.json();
     
-    // 显示视频信息
     videoTitle.textContent = data.title || '未知标题';
     videoPlatform.textContent = data.platform || '未知';
     videoDuration.textContent = formatDuration(data.duration);
     videoInfoDiv.classList.remove('hidden');
     
-    // 保存格式列表
     videoFormats = data.formats || [];
-    
-    // 显示格式选择
     displayFormats(videoFormats);
     
-    // 更改按钮状态
     downloadBtn.textContent = '开始下载';
     downloadBtn.disabled = false;
     downloadBtn.onclick = startDownload;
@@ -199,7 +386,6 @@ async function parseVideo() {
     setTimeout(hideStatus, 3000);
     
   } catch (error) {
-    console.error('解析视频失败:', error);
     showStatus(`解析失败: ${error.message}`, 'error');
     downloadBtn.disabled = false;
     downloadBtn.textContent = '解析视频';
@@ -215,7 +401,6 @@ function displayFormats(formats) {
     return;
   }
   
-  // 只显示前8个格式
   const displayFormats = formats.slice(0, 8);
   
   displayFormats.forEach((format, index) => {
@@ -247,7 +432,6 @@ function displayFormats(formats) {
 
 // 开始下载
 async function startDownload() {
-  // 确保客户端ID已就绪
   await ensureClientIdReady();
   
   const url = urlInput.value.trim();
@@ -286,91 +470,116 @@ async function startDownload() {
     showStatus('下载任务已创建，正在下载...');
     showProgress(0);
     
-    // 开始轮询任务状态
+    pollCount = 0;
     startPolling(currentJobId);
     
   } catch (error) {
-    console.error('创建下载任务失败:', error);
     showStatus(`下载失败: ${error.message}`, 'error');
     downloadBtn.disabled = false;
     downloadBtn.textContent = '开始下载';
   }
 }
 
+// 根据阶段获取轮询间隔
+function getPollInterval(stage) {
+  switch (stage) {
+    case 'queued':
+      return 3000;
+    case 'downloading':
+      return 1000;
+    case 'merging':
+      return 2000;
+    case 'processing':
+      return 1500;
+    case 'ready':
+      return 500;
+    default:
+      return 2000;
+  }
+}
+
 // 轮询任务状态
-function startPolling(jobId) {
-  if (pollInterval) {
-    clearInterval(pollInterval);
+async function startPolling(jobId) {
+  if (pollTimeout) {
+    clearTimeout(pollTimeout);
   }
   
-  pollInterval = setInterval(async () => {
-    try {
-      const response = await fetch(`${API_BASE}/api/download/${jobId}`, {
-        method: 'GET',
-        headers: createHeaders()
-      });
-      
-      if (!response.ok) {
-        throw new Error('获取任务状态失败');
-      }
-      
-      const job = await response.json();
-      
-      // 更新进度
-      if (job.progress !== undefined) {
-        showProgress(job.progress, job.speed || null);
-      }
-      
-      // 更新状态文本
-      let statusText = '';
-      switch (job.stage) {
-        case 'queued':
-          statusText = '等待中...';
-          break;
-        case 'downloading':
-          statusText = `下载中... ${job.progress?.toFixed(1) || 0}%`;
-          break;
-        case 'merging':
-          statusText = '合并音视频...';
-          break;
-        case 'ready':
-          statusText = '下载完成，准备保存...';
-          break;
-        case 'completed':
-          statusText = '下载完成！';
-          break;
-        case 'failed':
-          statusText = `下载失败: ${job.error || '未知错误'}`;
-          break;
-        case 'canceled':
-          statusText = '下载已取消';
-          break;
-        default:
-          statusText = job.stage || '处理中...';
-      }
-      
-      showStatus(statusText, job.stage === 'failed' ? 'error' : 'loading');
-      
-      // 任务完成或失败
-      if (['ready', 'completed', 'failed', 'canceled'].includes(job.stage)) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-        
-        if (job.stage === 'ready' || job.stage === 'completed') {
-          // 下载文件
-          await downloadFile(jobId, job.filename);
-          showStatus('下载完成！', 'success');
-        }
-        
-        downloadBtn.disabled = false;
-        downloadBtn.textContent = '开始下载';
-        setTimeout(hideProgress, 2000);
-      }
-      
-    } catch (error) {
-      console.error('轮询任务状态失败:', error);
+  pollCount++;
+  
+  if (pollCount > MAX_POLL_COUNT) {
+    showStatus('下载超时，请重试', 'error');
+    downloadBtn.disabled = false;
+    downloadBtn.textContent = '开始下载';
+    return;
+  }
+  
+  try {
+    const response = await fetch(`${API_BASE}/api/download/${jobId}`, {
+      method: 'GET',
+      headers: createHeaders()
+    });
+    
+    if (!response.ok) {
+      throw new Error('获取任务状态失败');
     }
-  }, 1000);
+    
+    const job = await response.json();
+    
+    if (job.progress !== undefined) {
+      showProgress(job.progress, job.speed || null);
+    }
+    
+    let statusText = '';
+    switch (job.stage) {
+      case 'queued':
+        statusText = '等待中...';
+        break;
+      case 'downloading':
+        statusText = `下载中... ${job.progress?.toFixed(1) || 0}%`;
+        break;
+      case 'merging':
+        statusText = '合并音视频...';
+        break;
+      case 'processing':
+        statusText = '处理中...';
+        break;
+      case 'ready':
+        statusText = '下载完成，准备保存...';
+        break;
+      case 'completed':
+        statusText = '下载完成！';
+        break;
+      case 'failed':
+        statusText = `下载失败: ${job.error || '未知错误'}`;
+        break;
+      case 'canceled':
+        statusText = '下载已取消';
+        break;
+      default:
+        statusText = job.stage || '处理中...';
+    }
+    
+    showStatus(statusText, job.stage === 'failed' ? 'error' : 'loading');
+    
+    if (['ready', 'completed', 'failed', 'canceled'].includes(job.stage)) {
+      if (job.stage === 'ready' || job.stage === 'completed') {
+        await downloadFile(jobId, job.filename);
+        showStatus('下载完成！', 'success');
+      }
+      
+      downloadBtn.disabled = false;
+      downloadBtn.textContent = '开始下载';
+      setTimeout(hideProgress, 2000);
+      return;
+    }
+    
+    const nextInterval = getPollInterval(job.stage);
+    pollTimeout = setTimeout(() => startPolling(jobId), nextInterval);
+    
+  } catch (error) {
+    const nextInterval = getPollInterval('queued');
+    pollTimeout = setTimeout(() => startPolling(jobId), nextInterval);
+  }
 }
 
 // 下载文件
@@ -378,7 +587,6 @@ async function downloadFile(jobId, filename) {
   try {
     const downloadUrl = `${API_BASE}/api/download/${jobId}/file`;
     
-    // 使用Chrome下载API，直接保存到默认下载路径
     await chrome.downloads.download({
       url: downloadUrl,
       filename: filename || 'video.mp4',
@@ -386,7 +594,6 @@ async function downloadFile(jobId, filename) {
     });
     
   } catch (error) {
-    console.error('下载文件失败:', error);
     showStatus('文件保存失败', 'error');
   }
 }
@@ -402,7 +609,7 @@ downloadBtn.addEventListener('click', () => {
 
 // 清理
 window.addEventListener('beforeunload', () => {
-  if (pollInterval) {
-    clearInterval(pollInterval);
+  if (pollTimeout) {
+    clearTimeout(pollTimeout);
   }
 });

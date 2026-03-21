@@ -1,0 +1,198 @@
+/* YouTube下载按钮样式 */
+
+/* 主容器 */
+#yt-download-btn {
+    display: flex;
+    align-items: center;
+    margin-left: 8px;
+    position: relative;
+}
+
+/* 快速下载按钮 */
+.yt-fast-download {
+    background: #0f0f0f;
+    color: #fff;
+    border: 1px solid #303030;
+    padding: 6px 12px;
+    border-radius: 18px 0 0 18px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background 0.2s;
+}
+
+.yt-fast-download:hover {
+    background: #272727;
+}
+
+.yt-fast-download:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* 下拉按钮 */
+.yt-dropdown {
+    background: #0f0f0f;
+    color: #fff;
+    border: 1px solid #303030;
+    border-left: none;
+    padding: 6px 8px;
+    border-radius: 0 18px 18px 0;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.2s;
+}
+
+.yt-dropdown:hover {
+    background: #272727;
+}
+
+/* 质量选择菜单 */
+.yt-menu {
+    position: absolute;
+    background: #1f1f1f;
+    border-radius: 8px;
+    padding: 8px;
+    top: 40px;
+    right: 0;
+    z-index: 9999;
+    min-width: 120px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.yt-menu-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    border-radius: 4px;
+    color: #fff;
+    font-size: 14px;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.yt-menu-item:hover {
+    background: #333;
+}
+
+/* Pro功能标识 */
+.yt-menu-item.pro {
+    color: #ff6b6b;
+}
+
+.yt-menu-item.pro::after {
+    content: '🔒';
+    font-size: 12px;
+}
+
+/* Pro弹窗样式 */
+#pro-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 10000;
+}
+
+.modal-box {
+    background: #1f1f1f;
+    padding: 24px;
+    border-radius: 12px;
+    width: 300px;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.modal-box h2 {
+    color: #fff;
+    margin: 0 0 16px 0;
+    font-size: 20px;
+}
+
+.modal-box ul {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 20px 0;
+    text-align: left;
+}
+
+.modal-box li {
+    color: #fff;
+    padding: 8px 0;
+    font-size: 14px;
+}
+
+.upgrade-btn {
+    background: #ff0000;
+    color: white;
+    padding: 12px;
+    margin-top: 10px;
+    width: 100%;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.upgrade-btn:hover {
+    background: #cc0000;
+}
+
+.free-btn {
+    margin-top: 10px;
+    background: transparent;
+    color: #aaa;
+    border: none;
+    padding: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: color 0.2s;
+}
+
+.free-btn:hover {
+    color: #fff;
+}
+
+.close-btn {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: transparent;
+    border: none;
+    color: #aaa;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px;
+    line-height: 1;
+    transition: color 0.2s;
+}
+
+.close-btn:hover {
+    color: #fff;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+    .yt-fast-download {
+        padding: 5px 10px;
+        font-size: 13px;
+    }
+
+    .yt-dropdown {
+        padding: 5px 6px;
+    }
+
+    .modal-box {
+        width: 280px;
+        padding: 20px;
+    }
+}

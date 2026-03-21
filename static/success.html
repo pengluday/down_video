@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>支付成功 - 视频下载器</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            text-align: center;
+        }
+
+        .success-icon {
+            width: 80px;
+            height: 80px;
+            background: linear-gradient(135deg, #52c41a 0%, #389e0d 100%);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 24px;
+            font-size: 40px;
+            color: white;
+            box-shadow: 0 8px 20px rgba(82, 196, 26, 0.3);
+        }
+
+        h1 {
+            font-size: 28px;
+            color: #333;
+            margin-bottom: 12px;
+            font-weight: 700;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 16px;
+            margin-bottom: 32px;
+            line-height: 1.6;
+        }
+
+        .license-section {
+            background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+            border: 2px solid #667eea;
+        }
+
+        .license-label {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .license-key {
+            font-size: 24px;
+            font-weight: 700;
+            color: #667eea;
+            letter-spacing: 2px;
+            margin-bottom: 12px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .copy-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .copy-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+
+        .copy-btn:active {
+            transform: translateY(0);
+        }
+
+        .features {
+            text-align: left;
+            margin-bottom: 24px;
+        }
+
+        .features h3 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 16px;
+        }
+
+        .features ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .features li {
+            padding: 10px 0;
+            color: #666;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .features li::before {
+            content: '✓';
+            color: #52c41a;
+            font-weight: 700;
+            font-size: 18px;
+        }
+
+        .back-btn {
+            background: transparent;
+            color: #667eea;
+            border: 2px solid #667eea;
+            padding: 12px 32px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .back-btn:hover {
+            background: #667eea;
+            color: white;
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            color: #666;
+            font-size: 16px;
+        }
+
+        .spinner {
+            width: 24px;
+            height: 24px;
+            border: 3px solid #f3f3f3f;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <span>正在获取License Key...</span>
+        </div>
+
+        <div id="success" class="hidden">
+            <div class="success-icon">✓</div>
+            <h1>支付成功！</h1>
+            <p class="subtitle">感谢您的支持，这是您的License Key</p>
+
+            <div class="license-section">
+                <div class="license-label">您的License Key</div>
+                <div class="license-key" id="licenseKey">XXXX-XXXX-XXXX-XXXX</div>
+                <button class="copy-btn" onclick="copyLicenseKey()">复制License Key</button>
+            </div>
+
+            <div class="features">
+                <h3>🎉 Pro特权已激活</h3>
+                <ul>
+                    <li>1080p高清下载</li>
+                    <li>无限下载次数</li>
+                    <li>高速下载，不限速</li>
+                    <li>无广告干扰</li>
+                </ul>
+            </div>
+
+            <a href="/" class="back-btn">返回首页</a>
+        </div>
+
+        <div id="error" class="hidden">
+            <div class="success-icon" style="background: linear-gradient(135deg, #ff4d4f 0%, #cf1322 100%);">✕</div>
+            <h1>获取License Key失败</h1>
+            <p class="subtitle">请检查您的邮箱或联系客服</p>
+            <a href="/" class="back-btn">返回首页</a>
+        </div>
+    </div>
+
+    <script>
+        async function getLicenseKey() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const sessionId = urlParams.get('session_id');
+
+            if (!sessionId) {
+                showError();
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/license/by-session/${sessionId}`);
+                const data = await response.json();
+
+                if (data.success && data.license_key) {
+                    showSuccess(data.license_key);
+                } else {
+                    showError();
+                }
+            } catch (error) {
+                console.error('获取License Key失败:', error);
+                showError();
+            }
+        }
+
+        function showSuccess(licenseKey) {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('success').classList.remove('hidden');
+            document.getElementById('licenseKey').textContent = licenseKey;
+        }
+
+        function showError() {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('error').classList.remove('hidden');
+        }
+
+        function copyLicenseKey() {
+            const licenseKey = document.getElementById('licenseKey').textContent;
+            navigator.clipboard.writeText(licenseKey).then(() => {
+                const btn = document.querySelector('.copy-btn');
+                btn.textContent = '已复制！';
+                setTimeout(() => {
+                    btn.textContent = '复制License Key';
+                }, 2000);
+            }).catch(err => {
+                console.error('复制失败:', err);
+                alert('复制失败，请手动复制');
+            });
+        }
+
+        // 页面加载时获取License Key
+        getLicenseKey();
+    </script>
+</body>
+</html>

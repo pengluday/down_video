@@ -24,6 +24,9 @@
             backdrop-filter: blur(10px);
             padding: 20px 24px;
             border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
 
         .header h1 {
@@ -38,6 +41,20 @@
         .header h1::before {
             content: '🎬';
             font-size: 24px;
+        }
+
+        .pro-badge {
+            background: linear-gradient(135deg, #ffd700 0%, #ffb700 100%);
+            color: #333;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+            box-shadow: 0 2px 8px rgba(255, 215, 0, 0.3);
+        }
+
+        .pro-badge.hidden {
+            display: none;
         }
 
         .container {
@@ -79,6 +96,88 @@
 
         .url-input::placeholder {
             color: #aaa;
+        }
+
+        .license-group {
+            margin-bottom: 20px;
+        }
+
+        .license-input-wrapper {
+            display: flex;
+            gap: 8px;
+        }
+
+        .license-input {
+            flex: 1;
+            padding: 12px 14px;
+            border: 2px solid #e8e8e8;
+            border-radius: 12px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            background: #fafafa;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .license-input:focus {
+            outline: none;
+            border-color: #667eea;
+            background: white;
+            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+        }
+
+        .license-input::placeholder {
+            text-transform: none;
+            letter-spacing: normal;
+            color: #aaa;
+        }
+
+        .activate-btn {
+            padding: 12px 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            white-space: nowrap;
+        }
+
+        .activate-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+
+        .activate-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .license-status {
+            margin-top: 8px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .license-status.success {
+            background: #e8f5e9;
+            color: #388e3c;
+            border-left: 3px solid #388e3c;
+        }
+
+        .license-status.error {
+            background: #ffebee;
+            color: #d32f2f;
+            border-left: 3px solid #d32f2f;
+        }
+
+        .license-status.hidden {
+            display: none;
         }
 
         .video-info {
@@ -348,12 +447,22 @@
 <body>
     <div class="header">
         <h1>视频下载器</h1>
+        <div id="proBadge" class="pro-badge hidden">PRO</div>
     </div>
 
     <div class="container">
         <div class="input-group">
             <label class="input-label">视频链接</label>
             <input type="text" id="urlInput" class="url-input" placeholder="粘贴或输入视频链接...">
+        </div>
+
+        <div class="license-group">
+            <label class="input-label">License Key（可选）</label>
+            <div class="license-input-wrapper">
+                <input type="text" id="licenseKeyInput" class="license-input" placeholder="XXXX-XXXX-XXXX-XXXX">
+                <button id="activateBtn" class="activate-btn">激活</button>
+            </div>
+            <div id="licenseStatus" class="license-status hidden"></div>
         </div>
 
         <div id="videoInfo" class="video-info hidden">
@@ -393,7 +502,7 @@
     </div>
 
     <div class="footer">
-        由 <a href="http://47.99.72.247:9001" target="_blank">本地服务</a> 提供支持
+        由 <a href="http://127.0.0.1:9001" target="_blank">本地服务</a> 提供支持
     </div>
 
     <script src="popup.js"></script>
