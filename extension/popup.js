@@ -1,7 +1,7 @@
 // 视频下载器 - 简化版
 // 只作为入口，所有解析和下载功能由后端处理
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://47.99.72.247:9001';
 const CLIENT_ID_KEY = 'video_downloader_client_id';
 
 let currentJobId = null;

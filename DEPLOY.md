@@ -58,7 +58,7 @@ User=www-data
 Group=www-data
 WorkingDirectory=/var/www/video-downloader
 Environment="PATH=/var/www/video-downloader/venv/bin"
-ExecStart=/var/www/video-downloader/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+ExecStart=/var/www/video-downloader/venv/bin/uvicorn main:app --host 0.0.0.0 --port 9001
 Restart=always
 RestartSec=3
 
@@ -94,7 +94,7 @@ server {
     server_name api.yourdomain.com;
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:9001;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -270,7 +270,7 @@ server {
     }
 
     location /api/ {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:9001;
         # ... 其他代理配置
     }
 }
@@ -395,7 +395,7 @@ listen 443 ssl http2;
 sudo systemctl status video-downloader
 
 # 检查端口监听
-sudo netstat -tlnp | grep 8000
+sudo netstat -tlnp | grep 9001
 
 # 检查防火墙
 sudo ufw status
@@ -416,7 +416,7 @@ proxy_read_timeout 120s;
 
 ```bash
 # Uvicorn
-uvicorn main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 120
+uvicorn main:app --host 0.0.0.0 --port 9001 --timeout-keep-alive 120
 ```
 
 ### 9.3 yt-dlp 更新

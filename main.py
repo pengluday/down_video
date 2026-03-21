@@ -821,11 +821,11 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # ============= 启动入口 =============
 
 def open_browser():
-    webbrowser.open("http://127.0.0.1:8000")
+    webbrowser.open("http://127.0.0.1:9001")
 
 
 if __name__ == "__main__":
     start_cleanup_scheduler()
     threading.Timer(1.5, open_browser).start()
-    uvicorn.run(app, host="127.0.0.1", port=8000)
-    print("Server started: http://127.0.0.1:8000")
+    uvicorn.run(app, host="127.0.0.1", port=9001)
+    print("Server started: http://127.0.0.1:9001")

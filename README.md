@@ -34,7 +34,7 @@
 ```
 浏览器
   ↓ POST /api/download (创建任务)
-FastAPI 后端 (localhost:8000)
+FastAPI 后端 (localhost:9001)
   ↓ 返回 job_id
 浏览器
   ↓ GET /api/download/{job_id} (轮询进度)
@@ -76,12 +76,12 @@ python main.py
 或
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 0.0.0.0 --port 9001 --reload
 ```
 
 ### 3. 访问应用
 
-打开浏览器访问: http://localhost:8000
+打开浏览器访问: http://localhost:9001
 
 ## API 接口
 
@@ -268,7 +268,7 @@ fetch('/api/download', {
 2. 在 API 中传递文件路径：
 
 ```bash
-curl "http://localhost:8000/api/info?url=视频链接&cookie=/path/to/cookies.txt"
+curl "http://localhost:9001/api/info?url=视频链接&cookie=/path/to/cookies.txt"
 ```
 
 ### Cookie 使用场景

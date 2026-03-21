@@ -3,7 +3,7 @@ import requests
 
 def analyze(url):
     try:
-        res = requests.get(f"http://localhost:8000/api/info?url={url}")
+        res = requests.get(f"http://localhost:9001/api/info?url={url}")
         data = res.json()
         return {'formats': [f"{f['height']}p - {f['format_id']}" for f in data['formats']], 'title': data['title']}
     except Exception as e:
@@ -11,7 +11,7 @@ def analyze(url):
 
 def download(url, fmt, title):
     try:
-        res = requests.get(f"http://localhost:8000/api/download?url={url}&format_id={fmt}")
+        res = requests.get(f"http://localhost:9001/api/download?url={url}&format_id={fmt}")
         filename = title[:50] + '.mp4'
         with open(filename, 'wb') as f:
             f.write(res.content)
