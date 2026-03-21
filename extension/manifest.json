@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "视频下载器",
+  "version": "2.0.0",
+  "description": "从主流视频平台下载视频",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

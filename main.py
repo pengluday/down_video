@@ -20,7 +20,7 @@ import time
 import uuid
 import webbrowser
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -57,6 +57,7 @@ class DownloadJob:
     format_id: str | None
     quality: int | None
     cookie: str | None
+    client_id: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     status: str = "queued"
@@ -357,9 +358,10 @@ def run_download_job(job_id: str) -> None:
                     file_size=file_size,
                     download_url=job.url,
                     platform=platform,
-                    duration=info.get("duration")
+                    duration=info.get("duration"),
+                    client_id=job.client_id
                 )
-                logger.info(f"[History] 已保存下载历史: {title}")
+                logger.info(f"[History] 已保存下载历史: {title} (客户端: {job.client_id})")
             except Exception as e:
                 logger.error(f"[History] 保存历史记录失败: {e}")
 
@@ -440,6 +442,7 @@ app.add_middleware(
 
 @app.get("/api/info")
 async def get_video_info(
+    request: Request,
     url: str = Query(..., description="视频链接"),
     cookie: str = Query(None, description="Cookie字符串，用于解决登录限制"),
 ):
@@ -449,7 +452,8 @@ async def get_video_info(
     返回视频标题、可用格式等信息
     """
     start_time = time.time()
-    logger.info("[API] 解析视频: %s", url)
+    client_id = request.headers.get("X-Client-ID", "")
+    logger.info("[API] 解析视频: %s (客户端: %s)", url, client_id)
 
     try:
         ydl_opts = {
@@ -523,22 +527,24 @@ async def get_video_info(
 
 
 @app.post("/api/download")
-async def start_download_task(request: DownloadStartRequest):
+async def start_download_task(request: Request, request_data: DownloadStartRequest):
     """
     创建下载任务（异步），立即返回 job_id
     """
     cleanup_expired_jobs()
 
-    if not request.url:
+    if not request_data.url:
         raise HTTPException(status_code=400, detail="url 不能为空")
 
+    client_id = request.headers.get("X-Client-ID", "")
     job_id = uuid.uuid4().hex
     job = DownloadJob(
         job_id=job_id,
-        url=request.url,
-        format_id=request.format_id,
-        quality=request.quality,
-        cookie=request.cookie,
+        url=request_data.url,
+        format_id=request_data.format_id,
+        quality=request_data.quality,
+        cookie=request_data.cookie,
+        client_id=client_id,
     )
 
     with JOB_LOCK:
@@ -546,6 +552,7 @@ async def start_download_task(request: DownloadStartRequest):
         future = DOWNLOAD_EXECUTOR.submit(run_download_job, job_id)
         DOWNLOAD_JOBS[job_id].future = future
 
+    logger.info("[API] 创建下载任务: %s (客户端: %s)", job_id, client_id)
     return {
         "job_id": job_id,
         "status": "queued",
@@ -554,6 +561,7 @@ async def start_download_task(request: DownloadStartRequest):
 
 @app.get("/api/download")
 async def legacy_download_video(
+    request: Request,
     url: str = Query(..., description="视频链接"),
     format_id: str = Query(None, description="格式ID，如 136 (720p)"),
     quality: int = Query(None, description="分辨率，如 720"),
@@ -565,6 +573,7 @@ async def legacy_download_video(
     """
     cleanup_expired_jobs()
 
+    client_id = request.headers.get("X-Client-ID", "")
     job_id = uuid.uuid4().hex
     job = DownloadJob(
         job_id=job_id,
@@ -572,6 +581,7 @@ async def legacy_download_video(
         format_id=format_id,
         quality=quality,
         cookie=cookie,
+        client_id=client_id,
     )
 
     with JOB_LOCK:
@@ -724,6 +734,36 @@ async def get_history(limit: int = Query(100, ge=1, le=500)):
     except Exception as e:
         logger.error(f"获取历史记录失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取历史记录失败: {str(e)}")
+
+
+@app.get("/api/history/client/{client_id}")
+async def get_client_history(client_id: str, limit: int = Query(100, ge=1, le=500)):
+    """获取指定客户端的下载历史记录"""
+    try:
+        records = history_db.get_records_by_client(client_id=client_id, limit=limit)
+        return {
+            "success": True,
+            "client_id": client_id,
+            "records": records,
+            "total": len(records)
+        }
+    except Exception as e:
+        logger.error(f"获取客户端历史记录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取客户端历史记录失败: {str(e)}")
+
+
+@app.get("/api/history/client/{client_id}/stats")
+async def get_client_stats(client_id: str):
+    """获取指定客户端的下载统计信息"""
+    try:
+        stats = history_db.get_client_stats(client_id=client_id)
+        return {
+            "success": True,
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"获取客户端统计信息失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取客户端统计信息失败: {str(e)}")
 
 
 @app.delete("/api/history")

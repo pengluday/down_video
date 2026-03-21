@@ -491,6 +491,7 @@ function renderHistory(records) {
                     <span>📦 ${sizeStr}</span>
                     ${record.duration ? `<span>⏱️ ${formatDuration(record.duration)}</span>` : ''}
                 </div>
+                ${record.client_id ? `<div class="history-item-client">🆔 ${escapeHtml(record.client_id)}</div>` : ''}
             </div>
         `;
     }).join('');
