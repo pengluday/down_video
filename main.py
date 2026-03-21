@@ -1,45 +1,405 @@
 """
-视频下载工具 - 服务器中转模式
+视频下载工具 - 任务队列模式
 服务器负责下载视频并转发给用户
 
-架构：浏览器 → 服务器 → YouTube/TikTok → 服务器 → 浏览器
+架构：浏览器 -> FastAPI 任务接口 -> 后台下载线程 -> 浏览器拉取文件
 """
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import yt_dlp
-import logging
-import time
-import sys
-import os
-import tempfile
-import asyncio
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
+import asyncio
+import logging
+import os
+import shutil
+import sys
+import tempfile
 import threading
-import uvicorn
+import time
+import uuid
 import webbrowser
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from starlette.background import BackgroundTask
+import uvicorn
+import yt_dlp
+
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
 
 # 临时文件目录
 TEMP_DIR = Path(tempfile.gettempdir()) / "video_downloader"
 TEMP_DIR.mkdir(exist_ok=True)
+
+# 下载任务配置
+MAX_DOWNLOAD_WORKERS = 2
+JOB_RETENTION_SECONDS = 60 * 60
+FINAL_STATES = {"ready", "completed", "failed", "canceled"}
+
+
+@dataclass
+class DownloadJob:
+    job_id: str
+    url: str
+    format_id: str | None
+    quality: int | None
+    cookie: str | None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    status: str = "queued"
+    stage: str = "queued"
+    progress: float = 0.0
+    speed: str | None = None
+    eta: int | None = None
+    error: str | None = None
+    file_path: str | None = None
+    filename: str | None = None
+    file_size: int | None = None
+    work_dir: str | None = None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    future: Future | None = None
+
+
+DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS)
+DOWNLOAD_JOBS: dict[str, DownloadJob] = {}
+JOB_LOCK = threading.Lock()
+
+
+class DownloadStartRequest(BaseModel):
+    url: str
+    format_id: str | None = None
+    quality: int | None = None
+    cookie: str | None = None
+
+
+def sanitize_filename(filename: str) -> str:
+    invalid_chars = set('<>:"/\\|?*')
+    safe_title = "".join(
+        "_" if (ord(c) < 32 or c in invalid_chars) else c
+        for c in filename
+    )
+    safe_title = " ".join(safe_title.split()).strip().strip(".")
+    if not safe_title:
+        safe_title = "video"
+    return safe_title[:200]
+
+
+def build_content_disposition(filename: str) -> str:
+    encoded_filename = quote(filename)
+    fallback_ascii = "".join(
+        c if c.isascii() and 32 <= ord(c) < 127 and c not in {'"', "\\"} else "_"
+        for c in filename
+    ).strip()
+    if not fallback_ascii:
+        fallback_ascii = "video.mp4"
+    return f"attachment; filename=\"{fallback_ascii}\"; filename*=UTF-8''{encoded_filename}"
+
+
+def format_speed(speed_bytes: float | None) -> str | None:
+    if not speed_bytes:
+        return None
+    if speed_bytes > 1024 * 1024:
+        return f"{speed_bytes / (1024 * 1024):.2f} MB/s"
+    return f"{speed_bytes / 1024:.2f} KB/s"
+
+
+def build_format_string(format_id: str | None, quality: int | None) -> str:
+    if format_id:
+        if "+" in format_id:
+            return format_id
+        return f"{format_id}+bestaudio/best"
+    if quality:
+        return f"best[height<={quality}]+bestaudio/best[height<={quality}]/best"
+    return "best+bestaudio/best"
+
+
+def cleanup_job_files(job: DownloadJob) -> None:
+    try:
+        if job.file_path:
+            file_path = Path(job.file_path)
+            if file_path.exists():
+                file_path.unlink()
+    except Exception as ex:
+        logger.warning("删除任务文件失败: job_id=%s err=%s", job.job_id, ex)
+
+    if job.work_dir:
+        try:
+            work_dir = Path(job.work_dir)
+            if work_dir.exists():
+                shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception as ex:
+            logger.warning("删除任务目录失败: job_id=%s err=%s", job.job_id, ex)
+
+
+def cleanup_expired_jobs() -> None:
+    now = time.time()
+    expired_jobs: list[DownloadJob] = []
+
+    with JOB_LOCK:
+        for job_id, job in list(DOWNLOAD_JOBS.items()):
+            if job.status in FINAL_STATES and now - job.updated_at > JOB_RETENTION_SECONDS:
+                expired_jobs.append(job)
+                del DOWNLOAD_JOBS[job_id]
+
+    for job in expired_jobs:
+        cleanup_job_files(job)
+
+
+def serialize_job(job: DownloadJob) -> dict:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "stage": job.stage,
+        "progress": round(job.progress, 2),
+        "speed": job.speed,
+        "eta": job.eta,
+        "error": job.error,
+        "filename": job.filename,
+        "file_size": job.file_size,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def get_job_or_404(job_id: str) -> DownloadJob:
+    with JOB_LOCK:
+        job = DOWNLOAD_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return job
+
+
+def run_download_job(job_id: str) -> None:
+    with JOB_LOCK:
+        job = DOWNLOAD_JOBS.get(job_id)
+        if not job:
+            return
+        job.status = "downloading"
+        job.stage = "downloading"
+        job.updated_at = time.time()
+
+    logger.info("[Download] 任务开始: %s", job_id)
+    work_dir = TEMP_DIR / f"job_{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    with JOB_LOCK:
+        if job_id in DOWNLOAD_JOBS:
+            DOWNLOAD_JOBS[job_id].work_dir = str(work_dir)
+
+    format_str = build_format_string(job.format_id, job.quality)
+
+    def progress_hook(data: dict) -> None:
+        with JOB_LOCK:
+            current = DOWNLOAD_JOBS.get(job_id)
+            if not current:
+                return
+            cancel_requested = current.cancel_event.is_set()
+
+        if cancel_requested:
+            raise yt_dlp.utils.DownloadError("DOWNLOAD_CANCELED")
+
+        if data.get("status") == "downloading":
+            total = data.get("total_bytes") or data.get("total_bytes_estimate")
+            downloaded = data.get("downloaded_bytes") or 0
+            progress = 0.0
+            if total and total > 0:
+                progress = min(99.0, downloaded * 100 / total)
+            with JOB_LOCK:
+                current = DOWNLOAD_JOBS.get(job_id)
+                if current:
+                    current.progress = progress
+                    current.speed = format_speed(data.get("speed"))
+                    current.eta = data.get("eta")
+                    current.stage = "downloading"
+                    current.updated_at = time.time()
+        elif data.get("status") == "finished":
+            with JOB_LOCK:
+                current = DOWNLOAD_JOBS.get(job_id)
+                if current:
+                    current.progress = max(current.progress, 99.0)
+                    current.stage = "processing"
+                    current.updated_at = time.time()
+
+    def postprocessor_hook(data: dict) -> None:
+        with JOB_LOCK:
+            current = DOWNLOAD_JOBS.get(job_id)
+            if not current:
+                return
+            cancel_requested = current.cancel_event.is_set()
+
+        if cancel_requested:
+            raise yt_dlp.utils.DownloadError("DOWNLOAD_CANCELED")
+
+        status = data.get("status")
+        if status in {"started", "processing"}:
+            with JOB_LOCK:
+                current = DOWNLOAD_JOBS.get(job_id)
+                if current:
+                    current.stage = "merging"
+                    current.progress = max(current.progress, 99.0)
+                    current.updated_at = time.time()
+
+    ydl_opts = {
+        "format": format_str,
+        "outtmpl": str(work_dir / "%(title).120B [%(id)s].%(ext)s"),
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "progress_hooks": [progress_hook],
+        "postprocessor_hooks": [postprocessor_hook],
+        "postprocessor_args": {
+            "ffmpeg": ["-c:a", "aac", "-b:a", "192k"]
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web", "ios", "tv"],
+                "player_skip": ["configs"],
+            }
+        },
+    }
+
+    if job.cookie:
+        cookie_path = Path(job.cookie)
+        if cookie_path.exists():
+            ydl_opts["cookiefile"] = str(cookie_path)
+        else:
+            ydl_opts["http_headers"] = {"Cookie": job.cookie}
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(job.url, download=True)
+
+        with JOB_LOCK:
+            current = DOWNLOAD_JOBS.get(job_id)
+            if not current:
+                return
+            if current.cancel_event.is_set():
+                current.status = "canceled"
+                current.stage = "canceled"
+                current.error = "下载已取消"
+                current.updated_at = time.time()
+        if current.cancel_event.is_set():
+            cleanup_job_files(current)
+            return
+
+        downloaded_file: Path | None = None
+
+        if isinstance(info, dict):
+            requested_downloads = info.get("requested_downloads") or []
+            for item in requested_downloads:
+                filepath = item.get("filepath")
+                if filepath:
+                    candidate = Path(filepath)
+                    if candidate.exists():
+                        downloaded_file = candidate
+                        break
+
+            if not downloaded_file:
+                for ext in (".mp4", ".webm", ".mkv", ".flv", ".mov"):
+                    files = list(work_dir.glob(f"*{ext}"))
+                    if files:
+                        downloaded_file = max(files, key=lambda p: p.stat().st_mtime)
+                        break
+
+            if not downloaded_file:
+                all_files = [p for p in work_dir.glob("*") if p.is_file()]
+                if all_files:
+                    downloaded_file = max(all_files, key=lambda p: p.stat().st_mtime)
+
+            if not downloaded_file or not downloaded_file.exists():
+                raise RuntimeError("下载失败：未找到输出文件")
+
+            title = info.get("title") or "video"
+            suffix = downloaded_file.suffix or ".mp4"
+            filename = f"{sanitize_filename(title)}{suffix}"
+            file_size = downloaded_file.stat().st_size
+
+            with JOB_LOCK:
+                current = DOWNLOAD_JOBS.get(job_id)
+                if current:
+                    current.status = "ready"
+                    current.stage = "ready"
+                    current.progress = 100.0
+                    current.filename = filename
+                    current.file_path = str(downloaded_file)
+                    current.file_size = file_size
+                    current.speed = None
+                    current.eta = None
+                    current.updated_at = time.time()
+
+            logger.info(
+                "[Download] 任务完成: %s 文件=%s 大小=%.2fMB",
+                job_id,
+                filename,
+                file_size / 1024 / 1024,
+            )
+            return
+
+        raise RuntimeError("下载失败：提取信息返回异常")
+
+    except yt_dlp.utils.DownloadError as ex:
+        error_message = str(ex)
+        with JOB_LOCK:
+            current = DOWNLOAD_JOBS.get(job_id)
+            if current:
+                if current.cancel_event.is_set() or "DOWNLOAD_CANCELED" in error_message:
+                    current.status = "canceled"
+                    current.stage = "canceled"
+                    current.error = "下载已取消"
+                else:
+                    current.status = "failed"
+                    current.stage = "failed"
+                    current.error = f"下载失败: {error_message}"
+                current.updated_at = time.time()
+        logger.warning("[Download] 任务失败: %s 错误=%s", job_id, error_message)
+    except Exception as ex:
+        with JOB_LOCK:
+            current = DOWNLOAD_JOBS.get(job_id)
+            if current:
+                current.status = "failed"
+                current.stage = "failed"
+                current.error = f"下载失败: {ex}"
+                current.updated_at = time.time()
+        logger.exception("[Download] 任务异常: %s", job_id)
+
+
+def mark_job_downloaded(job_id: str) -> None:
+    with JOB_LOCK:
+        job = DOWNLOAD_JOBS.get(job_id)
+        if not job:
+            return
+        job.status = "completed"
+        job.stage = "completed"
+        job.updated_at = time.time()
+    cleanup_job_files(job)
+    with JOB_LOCK:
+        current = DOWNLOAD_JOBS.get(job_id)
+        if not current:
+            return
+        current.file_path = None
+        current.file_size = None
+
 
 # ============= 应用配置 =============
 
 app = FastAPI(
     title="Video Downloader API",
     description="服务器中转视频下载服务",
-    version="5.0.0",
+    version="6.0.0",
     docs_url="/api/docs",
-    redoc_url="/api/redoc"
+    redoc_url="/api/redoc",
 )
 
 # CORS 配置 - 允许所有来源
@@ -51,18 +411,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ============= API 路由 =============
 
 @app.get("/api/info")
-async def get_video_info(url: str = Query(..., description="视频链接"), cookie: str = Query(None, description="Cookie字符串，用于解决登录限制")):
+async def get_video_info(
+    url: str = Query(..., description="视频链接"),
+    cookie: str = Query(None, description="Cookie字符串，用于解决登录限制"),
+):
     """
     解析视频信息
-    
+
     返回视频标题、可用格式等信息
     """
     start_time = time.time()
-    logger.info(f"[API] 解析视频: {url}")
-    
+    logger.info("[API] 解析视频: %s", url)
+
     try:
         ydl_opts = {
             "quiet": True,
@@ -71,213 +435,266 @@ async def get_video_info(url: str = Query(..., description="视频链接"), cook
             "extractor_args": {
                 "youtube": {
                     "player_client": ["android", "web", "ios", "tv"],
-                    "player_skip": ["configs"]
+                    "player_skip": ["configs"],
                 }
-            }
+            },
         }
-        
-        if cookie:
-            ydl_opts["cookies"] = cookie
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print("="*50)
-            info = ydl.extract_info(url, download=False)
-            print(info)
 
-        # 提取视频格式
+        if cookie:
+            cookie_path = Path(cookie)
+            if cookie_path.exists():
+                ydl_opts["cookiefile"] = str(cookie_path)
+            else:
+                ydl_opts["http_headers"] = {"Cookie": cookie}
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
         formats = []
-        
-        for f in info.get("formats", []):
-            height = f.get("height")
-            if f.get("vcodec") != "none" and height:
-                formats.append({
-                    "format_id": f["format_id"],
-                    "height": height,
-                    "ext": f.get("ext", "mp4"),
-                    "has_audio": f.get("acodec") != "none",
-                    "filesize": f.get("filesize") or f.get("filesize_approx")
-                })
-        
-        # 按分辨率排序，优先显示有音频的格式
+        for item in info.get("formats", []):
+            height = item.get("height")
+            if item.get("vcodec") != "none" and height:
+                formats.append(
+                    {
+                        "format_id": item["format_id"],
+                        "height": height,
+                        "ext": item.get("ext", "mp4"),
+                        "has_audio": item.get("acodec") != "none",
+                        "filesize": item.get("filesize") or item.get("filesize_approx"),
+                    }
+                )
+
         formats.sort(key=lambda x: (x["height"], x.get("has_audio", False)), reverse=True)
-        
-        # 提取平台信息
+
         platform = "unknown"
-        if "youtube" in url.lower():
+        url_lower = url.lower()
+        if "youtube" in url_lower:
             platform = "youtube"
-        elif "tiktok" in url.lower():
+        elif "tiktok" in url_lower:
             platform = "tiktok"
-        elif "bilibili" in url.lower():
+        elif "bilibili" in url_lower:
             platform = "bilibili"
-        
-        response = {
+
+        elapsed = time.time() - start_time
+        logger.info("[API] 解析完成，耗时: %.2fs, 找到 %s 个格式", elapsed, len(formats))
+
+        return {
             "title": info.get("title", "Unknown"),
             "formats": formats,
             "thumbnail": info.get("thumbnail"),
             "platform": platform,
-            "duration": info.get("duration")
+            "duration": info.get("duration"),
         }
-        
-        elapsed = time.time() - start_time
-        logger.info(f"[API] 解析完成，耗时: {elapsed:.2f}s, 找到 {len(formats)} 个格式")
-        
-        return response
-    
-    except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e)
+
+    except yt_dlp.utils.DownloadError as ex:
+        error_msg = str(ex)
         if "Requested format is not available" in error_msg or "This video is not available" in error_msg:
-            logger.warning(f"[API] 视频无可用格式: {url}")
-            raise HTTPException(status_code=400, detail="该视频无可用的下载格式，可能是已删除或仅限特定地区观看的视频")
-        else:
-            logger.error(f"[API] 解析错误: {error_msg}")
-            raise HTTPException(status_code=500, detail=error_msg)
-    except Exception as e:
-        logger.error(f"[API] 解析错误: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(
+                status_code=400,
+                detail="该视频无可用的下载格式，可能是已删除或仅限特定地区观看的视频",
+            )
+        raise HTTPException(status_code=500, detail=error_msg)
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
+
+
+@app.post("/api/download")
+async def start_download_task(request: DownloadStartRequest):
+    """
+    创建下载任务（异步），立即返回 job_id
+    """
+    cleanup_expired_jobs()
+
+    if not request.url:
+        raise HTTPException(status_code=400, detail="url 不能为空")
+
+    job_id = uuid.uuid4().hex
+    job = DownloadJob(
+        job_id=job_id,
+        url=request.url,
+        format_id=request.format_id,
+        quality=request.quality,
+        cookie=request.cookie,
+    )
+
+    with JOB_LOCK:
+        DOWNLOAD_JOBS[job_id] = job
+        future = DOWNLOAD_EXECUTOR.submit(run_download_job, job_id)
+        DOWNLOAD_JOBS[job_id].future = future
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+    }
 
 
 @app.get("/api/download")
-async def download_video(
+async def legacy_download_video(
     url: str = Query(..., description="视频链接"),
     format_id: str = Query(None, description="格式ID，如 136 (720p)"),
     quality: int = Query(None, description="分辨率，如 720"),
-    cookie: str = Query(None, description="Cookie字符串，用于解决登录限制")
+    cookie: str = Query(None, description="Cookie字符串，用于解决登录限制"),
 ):
     """
-    服务器中转下载
-    
-    服务器使用 yt-dlp 下载视频，然后转发给浏览器
+    兼容旧版前端：GET /api/download?url=...&format_id=...
+    内部走新任务系统，等待任务完成后直接返回文件流。
     """
-    start_time = time.time()
-    logger.info(f"[Download] 开始下载: {url}, format_id={format_id}, quality={quality}")
-    
-    try:
-        # 构建格式选择字符串
-        if format_id:
-            format_str = format_id
-            if "+" not in format_id:
-                # 如果是单独的视频格式，尝试合并音频
-                format_str = f"{format_id}+bestaudio/best"
-        elif quality:
-            format_str = f"best[height<={quality}]+bestaudio/best[height<={quality}]/best"
-        else:
-            format_str = "best+bestaudio/best"
-        
-        logger.info(f"[Download] 使用格式: {format_str}")
-        
-        # 生成临时文件名
-        temp_filename = f"video_{int(time.time())}"
-        temp_filepath = TEMP_DIR / temp_filename
-        
-        # yt-dlp 下载选项
-        ydl_opts = {
-            "format": format_str,
-            "outtmpl": str(temp_filepath) + ".%(ext)s",
-            "merge_output_format": "mp4",
-            "quiet": False,
-            "no_warnings": False,
-            "noplaylist": True,
-            "postprocessor_args": {
-                "ffmpeg": ["-c:a", "aac", "-b:a", "192k"]
-            },
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "web", "ios", "tv"],
-                    "player_skip": ["configs"]
-                }
-            }
-        }
-        
-        if cookie:
-            ydl_opts["cookies"] = cookie
-        
-        # 下载视频
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            ydl.download([url])
-            
-            # 获取实际下载的文件路径
-            # yt-dlp 可能会返回 requested_downloads 或直接在 info 中
-            if "requested_downloads" in info:
-                downloaded_file = Path(info["requested_downloads"][0]["filepath"])
-            else:
-                # 尝试查找文件
-                downloaded_file = None
-                for ext in [".mp4", ".webm", ".mkv", ".flv"]:
-                    potential_file = Path(str(temp_filepath) + ext)
-                    if potential_file.exists():
-                        downloaded_file = potential_file
-                        break
-                
-                if not downloaded_file:
-                    # 最后尝试使用原始路径
-                    downloaded_file = Path(str(temp_filepath) + ".mp4")
-            
-            if not downloaded_file.exists():
-                raise HTTPException(status_code=500, detail=f"下载失败：找不到文件 {downloaded_file}")
-            
-            # 获取文件大小
-            file_size = downloaded_file.stat().st_size
-            elapsed = time.time() - start_time
-            logger.info(f"[Download] 下载完成: {downloaded_file.name}, 大小: {file_size / 1024 / 1024:.2f}MB, 耗时: {elapsed:.2f}s")
-            
-            # 生成安全的文件名（只使用 ASCII 字符）
-            title = info.get("title", "video")
-            # 移除非 ASCII 字符，只保留字母、数字、空格、连字符和下划线
-            safe_title = "".join(c if c.isascii() and (c.isalnum() or c in (' ', '-', '_')) else '_' for c in title).strip()
-            if not safe_title or safe_title == '_':
-                safe_title = "video"
-            filename = f"{safe_title}.mp4"
-            
-            # 对文件名进行 URL 编码，支持中文
-            from urllib.parse import quote
-            encoded_filename = quote(filename)
-            
-            # 流式返回文件
-            def iterfile():
-                with open(downloaded_file, "rb") as f:
-                    while chunk := f.read(65536):
-                        yield chunk
-                # 传输完成后删除临时文件
-                try:
-                    downloaded_file.unlink()
-                    logger.info(f"[Download] 已删除临时文件: {downloaded_file.name}")
-                except Exception as e:
-                    logger.warning(f"[Download] 删除临时文件失败: {e}")
-            
-            return StreamingResponse(
-                iterfile(),
-                media_type="video/mp4",
+    cleanup_expired_jobs()
+
+    job_id = uuid.uuid4().hex
+    job = DownloadJob(
+        job_id=job_id,
+        url=url,
+        format_id=format_id,
+        quality=quality,
+        cookie=cookie,
+    )
+
+    with JOB_LOCK:
+        DOWNLOAD_JOBS[job_id] = job
+        future = DOWNLOAD_EXECUTOR.submit(run_download_job, job_id)
+        DOWNLOAD_JOBS[job_id].future = future
+
+    max_wait_seconds = 2 * 60 * 60
+    start_wait = time.time()
+
+    while True:
+        current = get_job_or_404(job_id)
+
+        if current.status == "ready":
+            if not current.file_path:
+                raise HTTPException(status_code=500, detail="下载失败：任务完成但文件不存在")
+
+            file_path = Path(current.file_path)
+            if not file_path.exists():
+                raise HTTPException(status_code=500, detail="下载失败：输出文件不存在")
+
+            filename = current.filename or file_path.name
+
+            return FileResponse(
+                path=file_path,
+                media_type="application/octet-stream",
                 headers={
-                    "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
-                    "Content-Length": str(file_size),
-                    "Cache-Control": "no-cache"
-                }
+                    "Content-Disposition": build_content_disposition(filename),
+                    "Cache-Control": "no-cache",
+                },
+                background=BackgroundTask(mark_job_downloaded, job_id),
             )
-    
-    except yt_dlp.utils.DownloadError as e:
-        logger.error(f"[Download] yt-dlp 错误: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
-    except Exception as e:
-        logger.error(f"[Download] 错误: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+        if current.status in {"failed", "canceled", "completed"}:
+            raise HTTPException(status_code=500, detail=current.error or f"下载失败: {current.status}")
+
+        if time.time() - start_wait > max_wait_seconds:
+            raise HTTPException(status_code=504, detail="下载超时，请稍后重试")
+
+        await asyncio.sleep(0.5)
+
+
+@app.get("/api/download/{job_id}")
+async def get_download_status(job_id: str):
+    """
+    查询下载任务状态和进度
+    """
+    cleanup_expired_jobs()
+    job = get_job_or_404(job_id)
+    return serialize_job(job)
+
+
+@app.post("/api/download/{job_id}/cancel")
+async def cancel_download_task(job_id: str):
+    """
+    取消下载任务
+    """
+    job = get_job_or_404(job_id)
+
+    should_cleanup = False
+
+    with JOB_LOCK:
+        current = DOWNLOAD_JOBS.get(job_id)
+        if not current:
+            raise HTTPException(status_code=404, detail="任务不存在")
+
+        if current.status in {"ready", "completed", "failed", "canceled"}:
+            return {"job_id": job_id, "status": current.status}
+
+        current.cancel_event.set()
+        if current.status == "queued":
+            if current.future and current.future.cancel():
+                current.status = "canceled"
+                current.stage = "canceled"
+                current.error = "下载已取消"
+                current.updated_at = time.time()
+                should_cleanup = True
+
+        if not should_cleanup:
+            current.status = "canceling"
+            current.stage = "canceling"
+            current.updated_at = time.time()
+
+    if should_cleanup:
+        cleanup_job_files(job)
+        return {"job_id": job_id, "status": "canceled"}
+    return {"job_id": job_id, "status": "canceling"}
+
+
+@app.get("/api/download/{job_id}/file")
+async def download_task_file(job_id: str):
+    """
+    下载任务生成的文件（只允许下载一次）
+    """
+    job = get_job_or_404(job_id)
+    if job.status != "ready":
+        raise HTTPException(status_code=409, detail="任务未完成，无法下载文件")
+    if not job.file_path:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    file_path = Path(job.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    filename = job.filename or file_path.name
+
+    return FileResponse(
+        path=file_path,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": build_content_disposition(filename),
+            "Cache-Control": "no-cache",
+        },
+        background=BackgroundTask(mark_job_downloaded, job_id),
+    )
 
 
 @app.get("/api/health")
 async def health_check():
     """健康检查接口"""
+    with JOB_LOCK:
+        total_jobs = len(DOWNLOAD_JOBS)
+        active_jobs = len(
+            [job for job in DOWNLOAD_JOBS.values() if job.status in {"queued", "downloading", "processing", "canceling"}]
+        )
     return {
         "status": "ok",
         "service": "video-downloader-api",
-        "version": "5.0.0",
-        "mode": "server-relay",
-        "timestamp": time.time()
+        "version": "6.0.0",
+        "mode": "task-queue",
+        "timestamp": time.time(),
+        "max_workers": MAX_DOWNLOAD_WORKERS,
+        "active_jobs": active_jobs,
+        "total_jobs": total_jobs,
     }
 
 
 # ============= 静态文件服务 =============
 
-STATIC_DIR = Path(__file__).parent / "static"
+def resolve_static_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "static"
+    return Path(__file__).resolve().parent / "static"
+
+
+STATIC_DIR = resolve_static_dir()
+
 
 @app.get("/")
 async def root():
@@ -287,21 +704,15 @@ async def root():
         return FileResponse(index_file)
     return {"message": "Video Downloader API", "docs": "/api/docs"}
 
-def get_path(relative_path):
-    if getattr(sys, 'frozen', False):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
 
-static_path = get_path("static")
-app.mount("/static", StaticFiles(directory=static_path), name="static")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 # ============= 启动入口 =============
 
 def open_browser():
     webbrowser.open("http://127.0.0.1:8000")
+
 
 if __name__ == "__main__":
     threading.Timer(1.5, open_browser).start()
