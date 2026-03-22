@@ -636,8 +636,8 @@ async def get_video_info(
     cookie: str = Query(None, description="Cookie字符串，用于解决登录限制")
 ):
     """
-    解析视频信息
-    返回视频标题、可用格式等信息
+    解析视频信息 - 优化版本
+    使用快速提取模式，减少解析时间
     """
     start_time = time.time()
     client_id = request.headers.get("X-Client-ID", "")
@@ -646,24 +646,39 @@ async def get_video_info(
     logger.info("[API] 解析视频: %s (客户端: %s)", url, client_id)
 
     try:
+        platform = detect_platform(url)
+        
+        # 基础配置
         ydl_opts = {
             "quiet": True,
             "skip_download": True,
             "noplaylist": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "web", "ios", "tv"],
-                    "player_skip": ["configs"],
-                }
+            "no_warnings": True,
+            "format": "best[height<=1080]/best",
+            "socket_timeout": 30,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             },
         }
+
+        # 平台特定配置
+        if platform == "youtube":
+            ydl_opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["android"],
+                    "player_skip": ["configs", "webpage", "jsargs"],
+                },
+            }
+        elif platform == "xiaohongshu":
+            # 小红书使用默认配置即可
+            pass
 
         if cookie:
             cookie_path = Path(cookie)
             if cookie_path.exists():
                 ydl_opts["cookiefile"] = str(cookie_path)
             else:
-                ydl_opts["http_headers"] = {"Cookie": cookie}
+                ydl_opts["http_headers"]["Cookie"] = cookie
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -675,39 +690,54 @@ async def get_video_info(
             if not is_valid:
                 license_info = None
 
+        limits_info = get_user_limits_info(license_info)
+
         formats = []
-        for item in info.get("formats", []):
+        raw_formats = info.get("formats", [])
+        logger.info("[API] 原始格式数量: %s, 平台: %s", len(raw_formats), platform)
+        
+        for item in raw_formats:
             height = item.get("height")
-            if item.get("vcodec") != "none" and height:
-                # 检查分辨率是否超过用户限制
-                limits_info = get_user_limits_info(license_info)
-                if height <= limits_info["max_resolution"]:
-                    formats.append(
-                        {
-                            "format_id": item["format_id"],
-                            "height": height,
-                            "ext": item.get("ext", "mp4"),
-                            "has_audio": item.get("acodec") != "none",
-                            "filesize": item.get("filesize") or item.get("filesize_approx"),
-                        }
-                    )
+            vcodec = item.get("vcodec", "none")
+            acodec = item.get("acodec", "none")
+            format_id = item.get("format_id", "")
+            ext = item.get("ext", "")
+            
+            # 放宽条件：有高度或有视频标识
+            is_video = (
+                (vcodec != "none" and vcodec) or 
+                height or 
+                "video" in format_id.lower() or
+                ext in ["mp4", "webm", "mkv", "avi"]
+            )
+            
+            if is_video:
+                video_height = height or 720
+                if video_height <= limits_info["max_resolution"]:
+                    formats.append({
+                        "format_id": format_id,
+                        "height": video_height,
+                        "ext": ext or "mp4",
+                        "has_audio": acodec != "none" and acodec,
+                        "filesize": item.get("filesize") or item.get("filesize_approx"),
+                    })
+
+        # 如果没有找到格式，添加一个默认格式
+        if not formats and raw_formats:
+            logger.warning("[API] 未找到标准格式，使用第一个可用格式")
+            first_format = raw_formats[0] if raw_formats else {}
+            formats.append({
+                "format_id": first_format.get("format_id", "best"),
+                "height": 720,
+                "ext": first_format.get("ext", "mp4"),
+                "has_audio": True,
+                "filesize": first_format.get("filesize"),
+            })
 
         formats.sort(key=lambda x: (x["height"], x.get("has_audio", False)), reverse=True)
 
-        platform = "unknown"
-        url_lower = url.lower()
-        if "youtube" in url_lower:
-            platform = "youtube"
-        elif "tiktok" in url_lower:
-            platform = "tiktok"
-        elif "bilibili" in url_lower:
-            platform = "bilibili"
-
         elapsed = time.time() - start_time
         logger.info("[API] 解析完成，耗时: %.2fs, 找到 %s 个格式", elapsed, len(formats))
-
-        # 获取用户限制信息
-        limits_info = get_user_limits_info(license_info)
 
         return {
             "title": info.get("title", "Unknown"),
@@ -720,14 +750,177 @@ async def get_video_info(
 
     except yt_dlp.utils.DownloadError as ex:
         error_msg = str(ex)
+        logger.error("[API] DownloadError: %s", error_msg)
+        
+        # 平台特定错误处理
+        if "XiaoHongShu" in error_msg or "No video formats found" in error_msg:
+            raise HTTPException(
+                status_code=400,
+                detail="小红书视频解析失败，请联系服务人员",
+            )
+        if "Unsupported URL" in error_msg:
+            raise HTTPException(
+                status_code=400,
+                detail="暂不支持该链接格式，请使用标准视频链接",
+            )
         if "Requested format is not available" in error_msg or "This video is not available" in error_msg:
             raise HTTPException(
                 status_code=400,
                 detail="该视频无可用的下载格式，可能是已删除或仅限特定地区观看的视频",
             )
-        raise HTTPException(status_code=500, detail=error_msg)
+        raise HTTPException(status_code=500, detail=f"解析失败: {error_msg}")
     except Exception as ex:
-        raise HTTPException(status_code=500, detail=str(ex))
+        logger.error("[API] 解析异常: %s", str(ex))
+        raise HTTPException(status_code=500, detail=f"解析失败: {str(ex)}")
+
+
+@app.get("/api/quick-info")
+async def get_quick_video_info(
+    request: Request,
+    url: str = Query(..., description="视频链接")
+):
+    """
+    快速解析视频信息 - 仅获取基本信息，用于预解析
+    返回最高质量格式，速度优先
+    """
+    start_time = time.time()
+    client_id = request.headers.get("X-Client-ID", "")
+    license_key = request.headers.get("X-License-Key")
+    
+    logger.info("[API] 快速解析: %s (客户端: %s)", url, client_id)
+
+    try:
+        platform = detect_platform(url)
+        
+        # 平台特定配置
+        ydl_opts = {
+            "quiet": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "no_warnings": True,
+            "format": "best[height<=1080]/best",
+            "socket_timeout": 15,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+        }
+
+        # 小红书需要特殊处理
+        if platform == "xiaohongshu":
+            ydl_opts["extractor_args"] = {
+                "xiaohongshu": {
+                    "cookiefile": None,  # 尝试无cookie解析
+                }
+            }
+            # 小红书可能需要更长的超时
+            ydl_opts["socket_timeout"] = 20
+        else:
+            ydl_opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["android"],
+                    "player_skip": ["configs", "webpage", "jsargs", "initial_data"],
+                },
+            }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        # 验证License Key
+        license_info = None
+        if license_key:
+            is_valid, license_info = verify_license(license_key)
+            if not is_valid:
+                license_info = None
+
+        limits_info = get_user_limits_info(license_info)
+
+        # 只返回最佳格式
+        best_format = None
+        formats = info.get("formats", [])
+        logger.info("[API] 快速解析原始格式数量: %s", len(formats))
+        
+        if formats:
+            for item in formats:
+                height = item.get("height")
+                vcodec = item.get("vcodec", "none")
+                format_id = item.get("format_id", "")
+                ext = item.get("ext", "")
+                
+                # 放宽条件
+                is_video = (
+                    (vcodec != "none" and vcodec) or 
+                    height or 
+                    "video" in format_id.lower() or
+                    ext in ["mp4", "webm", "mkv", "avi"]
+                )
+                
+                if is_video:
+                    video_height = height or 720
+                    if video_height <= limits_info["max_resolution"]:
+                        best_format = {
+                            "format_id": format_id,
+                            "height": video_height,
+                            "ext": ext or "mp4",
+                            "has_audio": item.get("acodec") != "none",
+                        }
+                        break
+
+        # 如果没有找到格式，使用默认格式
+        if not best_format:
+            logger.warning("[API] 快速解析未找到标准格式，使用默认格式")
+            best_format = {
+                "format_id": "best",
+                "height": 720,
+                "ext": "mp4",
+                "has_audio": True,
+            }
+
+        elapsed = time.time() - start_time
+        logger.info("[API] 快速解析完成，耗时: %.2fs, 平台: %s", elapsed, platform)
+
+        return {
+            "title": info.get("title", "Unknown"),
+            "formats": [best_format],
+            "thumbnail": info.get("thumbnail"),
+            "platform": platform,
+            "duration": info.get("duration"),
+            "limits": limits_info,
+            "quick": True
+        }
+
+    except Exception as ex:
+        logger.error("[API] 快速解析失败: %s - %s", url, str(ex))
+        error_msg = str(ex)
+        
+        # 小红书特殊处理
+        if "XiaoHongShu" in error_msg or "No video formats found" in error_msg or "xiaohongshu" in error_msg.lower():
+            raise HTTPException(
+                status_code=400, 
+                detail="小红书视频解析失败，可能需要登录或视频已下架"
+            )
+        elif "sign in" in error_msg.lower() or "login" in error_msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="该视频需要登录才能访问"
+            )
+        raise HTTPException(status_code=500, detail=f"解析失败: {error_msg}")
+
+
+def detect_platform(url: str) -> str:
+    url_lower = url.lower()
+    if "youtube" in url_lower or "youtu.be" in url_lower:
+        return "youtube"
+    elif "tiktok" in url_lower:
+        return "tiktok"
+    elif "douyin" in url_lower:
+        return "douyin"
+    elif "xiaohongshu" in url_lower or "xhslink" in url_lower:
+        return "xiaohongshu"
+    elif "x.com" in url_lower or "twitter" in url_lower:
+        return "x"
+    elif "bilibili" in url_lower:
+        return "bilibili"
+    return "unknown"
 
 
 @app.post("/api/download")

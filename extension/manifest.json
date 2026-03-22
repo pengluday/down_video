@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "视频下载器",
-  "version": "2.0.0",
-  "description": "从主流视频平台下载视频",
+  "version": "2.1.0",
+  "description": "从主流视频平台下载视频 - 支持YouTube、TikTok、小红书、抖音",
   "permissions": [
     "activeTab",
     "storage",
@@ -30,7 +30,12 @@
     {
       "matches": [
         "https://www.youtube.com/*",
-        "https://m.youtube.com/*"
+        "https://m.youtube.com/*",
+        "https://www.tiktok.com/*",
+        "https://www.douyin.com/*",
+        "https://www.xiaohongshu.com/*",
+        "https://xhslink.com/*",
+        "https://x.com/*"
       ],
       "js": ["content.js"],
       "css": ["content.css"],

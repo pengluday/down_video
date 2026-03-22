@@ -1,70 +1,125 @@
-/* YouTube下载按钮样式 */
+/* 多平台视频下载按钮样式 */
 
-/* 主容器 */
-#yt-download-btn {
+/* 浮动下载按钮 - 固定在右侧中间 */
+#yt-floating-btn {
+    position: fixed;
+    right: 20px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+/* 主按钮 - 默认红色(解析中) */
+.floating-download {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #ff4444 0%, #cc0000 100%);
+    color: #fff;
+    border: none;
+    font-size: 20px;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(255, 0, 0, 0.5);
+    transition: all 0.3s ease;
     display: flex;
     align-items: center;
-    margin-left: 8px;
+    justify-content: center;
     position: relative;
 }
 
-/* 快速下载按钮 */
-.yt-fast-download {
-    background: #0f0f0f;
-    color: #fff;
-    border: 1px solid #303030;
-    padding: 6px 12px;
-    border-radius: 18px 0 0 18px;
-    cursor: pointer;
-    font-size: 14px;
-    font-weight: 500;
-    white-space: nowrap;
-    transition: background 0.2s;
+/* 解析完成 - 绿色 */
+.floating-download.ready {
+    background: linear-gradient(135deg, #44ff44 0%, #00cc00 100%);
+    box-shadow: 0 4px 16px rgba(0, 255, 0, 0.5);
 }
 
-.yt-fast-download:hover {
-    background: #272727;
+/* 下载中 - 蓝色 */
+.floating-download.downloading {
+    background: linear-gradient(135deg, #4488ff 0%, #0044cc 100%);
+    box-shadow: 0 4px 16px rgba(0, 100, 255, 0.5);
 }
 
-.yt-fast-download:disabled {
+/* 完成 - 紫色 */
+.floating-download.done {
+    background: linear-gradient(135deg, #aa44ff 0%, #8800cc 100%);
+    box-shadow: 0 4px 16px rgba(170, 0, 255, 0.5);
+}
+
+/* 错误 - 橙色 */
+.floating-download.error {
+    background: linear-gradient(135deg, #ff8844 0%, #cc5500 100%);
+    box-shadow: 0 4px 16px rgba(255, 100, 0, 0.5);
+}
+
+.floating-download:hover {
+    transform: scale(1.1);
+}
+
+.floating-download:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+    transform: none;
 }
 
-/* 下拉按钮 */
-.yt-dropdown {
-    background: #0f0f0f;
+/* 分辨率标签 */
+.quality-badge {
+    position: absolute;
+    bottom: -8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.9);
     color: #fff;
-    border: 1px solid #303030;
-    border-left: none;
-    padding: 6px 8px;
-    border-radius: 0 18px 18px 0;
-    cursor: pointer;
-    font-size: 12px;
-    transition: background 0.2s;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: bold;
+    white-space: nowrap;
+    border: 2px solid #fff;
 }
 
-.yt-dropdown:hover {
-    background: #272727;
+.quality-badge.hd {
+    background: linear-gradient(135deg, #44ff44, #00cc00);
+    color: #000;
 }
 
 /* 质量选择菜单 */
-.yt-menu {
+.floating-menu {
     position: absolute;
+    right: 70px;
+    top: 50%;
+    transform: translateY(-50%);
     background: #1f1f1f;
-    border-radius: 8px;
+    border-radius: 12px;
     padding: 8px;
-    top: 40px;
-    right: 0;
-    z-index: 9999;
-    min-width: 120px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    min-width: 140px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    display: none;
+    animation: slideIn 0.2s ease;
 }
 
-.yt-menu-item {
-    padding: 8px 12px;
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-50%) translateX(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(-50%) translateX(0);
+    }
+}
+
+.floating-menu.show {
+    display: block;
+}
+
+.floating-menu-item {
+    padding: 10px 16px;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: 8px;
     color: #fff;
     font-size: 14px;
     transition: background 0.2s;
@@ -73,18 +128,33 @@
     justify-content: space-between;
 }
 
-.yt-menu-item:hover {
+.floating-menu-item:hover {
     background: #333;
 }
 
-/* Pro功能标识 */
-.yt-menu-item.pro {
+.floating-menu-item.selected {
+    background: #00cc00;
+    color: #000;
+}
+
+.floating-menu-item.pro {
     color: #ff6b6b;
 }
 
-.yt-menu-item.pro::after {
-    content: '🔒';
+/* 提示文字 */
+.hint-label {
+    background: rgba(0, 0, 0, 0.8);
+    color: #fff;
+    padding: 4px 10px;
+    border-radius: 12px;
     font-size: 12px;
+    white-space: nowrap;
+    animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 /* Pro弹窗样式 */
@@ -108,6 +178,7 @@
     width: 300px;
     text-align: center;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    position: relative;
 }
 
 .modal-box h2 {
@@ -182,17 +253,23 @@
 
 /* 响应式调整 */
 @media (max-width: 768px) {
-    .yt-fast-download {
-        padding: 5px 10px;
+    .floating-download {
+        width: 50px;
+        height: 50px;
+        font-size: 18px;
+    }
+
+    #yt-floating-btn {
+        right: 15px;
+    }
+
+    .floating-menu {
+        right: 60px;
+        min-width: 120px;
+    }
+
+    .floating-menu-item {
+        padding: 8px 12px;
         font-size: 13px;
-    }
-
-    .yt-dropdown {
-        padding: 5px 6px;
-    }
-
-    .modal-box {
-        width: 280px;
-        padding: 20px;
     }
 }

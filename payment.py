@@ -13,7 +13,7 @@ from models import SubscriptionTier
 
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "whsec_your_webhook_secret")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
 STRIPE_PRICE_IDS = {
     SubscriptionTier.PRO: os.getenv("STRIPE_PRICE_ID_PRO", ""),
